@@ -1,0 +1,12 @@
+node_modules/
+.next/
+out/
+dist/
+tsconfig.tsbuildinfo
+.env
+.env.local
+.env.*.local
+*.log
+.DS_Store
+# Secrets / local data — NEVER commit these.
+# (The Supabase DB password lives only in the Supabase dashboard.)

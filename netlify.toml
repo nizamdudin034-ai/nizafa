@@ -1,0 +1,29 @@
+# Nizafa — netlify.toml (Next.js app)
+# Deploy: connect this repo in Netlify (team "Nizafa") → the Next.js Runtime
+# is auto-detected. Set the env vars from .env.example in Site settings →
+# Environment variables. No build plugins to install by hand.
+
+[build]
+  command = "npm run build"
+  publish = ".next"
+
+[build.environment]
+  NODE_VERSION = "20"
+
+# SPA-style fallback is handled by Next.js itself; keep a plain 404 page.
+# Google OAuth callback route is /nizafa-auth (see src/app/nizafa-auth).
+# The exact redirect URI registered in Google Cloud must be:
+#   https://<site-name>.netlify.app/nizafa-auth
+
+[[headers]]
+  for = "/*"
+  [headers.values]
+    X-Frame-Options = "DENY"
+    X-Content-Type-Options = "nosniff"
+    Referrer-Policy = "strict-origin-when-cross-origin"
+
+# CDN caching: Next.js hashed assets are immutable — cache them for a year.
+[[headers]]
+  for = "/_next/static/*"
+  [headers.values]
+    Cache-Control = "public, max-age=31536000, immutable"

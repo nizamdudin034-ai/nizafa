@@ -4,7 +4,7 @@ import {
   createSupabaseServer,
   isSupabaseConfigured,
 } from "@/lib/supabase-server";
-import { getSessionUser, isOwner } from "@/lib/auth";
+import { getSessionUser, isOwner, ensureAppUser } from "@/lib/auth";
 import {
   fetchChannel,
   fetchLatestVideos,
@@ -72,6 +72,9 @@ export async function POST(req: Request) {
   }
 
   const admin = createSupabaseAdmin();
+  // Without an app_users row for this auth UID, the channels upsert fails
+  // on the channels_user_id_fkey foreign key (same bug as /api/generate).
+  await ensureAppUser(admin, user);
   const parsed = parseChannelInput(input);
 
   // Fresh cache? Serve it without spending quota.

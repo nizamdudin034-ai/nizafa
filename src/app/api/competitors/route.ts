@@ -4,7 +4,7 @@ import {
   createSupabaseServer,
   isSupabaseConfigured,
 } from "@/lib/supabase-server";
-import { getSessionUser, isOwner } from "@/lib/auth";
+import { getSessionUser, isOwner, ensureAppUser } from "@/lib/auth";
 import { connectCompetitorChannel } from "@/lib/competitors";
 
 // Competitor channels API — same connect flow as /api/channels, but the
@@ -52,6 +52,10 @@ export async function POST(req: Request) {
       { status: 400 }
     );
   }
+  const admin = createSupabaseAdmin();
+  // Without an app_users row for this auth UID, the competitor upsert fails
+  // on the channels_user_id_fkey foreign key (same bug as /api/generate).
+  await ensureAppUser(admin, user);
   const result = await connectCompetitorChannel(input, user.id);
   if ("error" in result) {
     return NextResponse.json({ error: result.error }, { status: 502 });

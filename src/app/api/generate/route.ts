@@ -7,7 +7,7 @@ import {
   createSupabaseAdmin,
   isSupabaseConfigured,
 } from "@/lib/supabase-server";
-import { getSessionUser } from "@/lib/auth";
+import { getSessionUser, ensureAppUser } from "@/lib/auth";
 
 export async function POST(req: Request) {
   const body = (await req.json().catch(() => ({}))) as {
@@ -32,6 +32,9 @@ export async function POST(req: Request) {
     try {
       const user = await getSessionUser();
       const admin = createSupabaseAdmin();
+      // Without an app_users row for this auth UID, the insert fails on the
+      // packages_user_id_fkey foreign key (bug reported 16 Nov 2026).
+      if (user) await ensureAppUser(admin, user);
       const { data, error } = await admin
         .from("packages")
         .insert({

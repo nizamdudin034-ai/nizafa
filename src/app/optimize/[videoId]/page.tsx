@@ -12,9 +12,10 @@ import {
   alternativesForPack,
   consistencyForPack,
   currentPackTitle,
+  suggestTitlesForTexts,
 } from "@/lib/consistency";
 import { scoreVideoSeo, viewsPerHour } from "@/lib/audit";
-import { topicKeywords, type SeoPack } from "@/lib/generator";
+import { buildThumbnailConcepts, topicKeywords, type SeoPack } from "@/lib/generator";
 import {
   matchPackToVideo,
   scoreVideoThumbnail,
@@ -121,7 +122,12 @@ export default async function AnalysisPage({
   const topic = pack?.topic ?? topicFromTitle(video.title);
   const topicKws = topicKeywords(topic);
 
-  const concepts = packPayload?.thumbnailConcepts ?? [];
+  const concepts =
+    (packPayload?.thumbnailConcepts?.length ?? 0) > 0
+      ? packPayload!.thumbnailConcepts
+      : buildThumbnailConcepts(topic);
+  const thumbSource: "pack" | "generated" =
+    (packPayload?.thumbnailConcepts?.length ?? 0) > 0 ? "pack" : "generated";
   const thumbScore = concepts[0] ? scoreVideoThumbnail(concepts[0]) : null;
   const thumbConcepts = concepts.map((c) => ({
     bigText: c.bigText,
@@ -146,6 +152,30 @@ export default async function AnalysisPage({
         ),
       }
     : null;
+
+  // No pack yet: standalone consistency + 3 max-match titles from the live
+  // description and the generated concepts. No script exists, so the
+  // script part honestly scores 0 — the card says so.
+  const standalone = consistencyInitial
+    ? null
+    : (() => {
+        const thumbText = thumbConcepts
+          .map((c) => `${c.bigText} ${c.layout}`)
+          .join(" ");
+        const s = suggestTitlesForTexts({
+          topic,
+          channelTitle: channel?.title ?? null,
+          description,
+          scriptText: "",
+          thumbnailText: thumbText,
+          currentTitle: video.title,
+        });
+        return {
+          currentTitle: video.title,
+          consistency: s.consistency,
+          alternatives: s.alternatives,
+        };
+      })();
 
   const titleChecks = scoreVideoSeo({
     title: video.title,
@@ -229,6 +259,10 @@ export default async function AnalysisPage({
         packId: pack?.id ?? null,
         packTopic: pack?.topic ?? null,
         consistencyInitial,
+        standalone,
+        thumbSource,
+        external: false,
+        backHref: null,
         thumbScore,
         thumbConcepts,
         topicKeywords: topicKws,

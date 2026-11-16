@@ -1,7 +1,11 @@
 // Latest video card — the channel's newest video with its real stats.
 // Thumbnail URL is derived from the video ID (YouTube's own thumbnail
 // host). Performance compares this video's views/hour with the channel
-// median — no invented benchmarks.
+// median — no invented benchmarks. Clicks open the in-app Analysis,
+// never YouTube.
+import Link from "next/link";
+import { analysisHref } from "@/lib/video-links";
+
 export type LatestVideoData = {
   videoId: string;
   title: string;
@@ -12,6 +16,8 @@ export type LatestVideoData = {
   vph: number;
   medianVph: number;
   rankLabel: string;
+  /** True when the video belongs to the user's own channel. */
+  isOwn: boolean;
 };
 
 function timeAgo(iso: string | null): string {
@@ -44,7 +50,7 @@ export default function LatestVideoCard({ video }: { video: LatestVideoData }) {
         </div>
         <span className="badge badge-teal">{band}</span>
       </div>
-      <a href={video.url} target="_blank" rel="noreferrer">
+      <Link href={analysisHref(video.videoId, video.isOwn)} aria-label={video.title}>
         {/* eslint-disable-next-line @next/next/no-img-element */}
         <img
           src={thumb}
@@ -52,15 +58,13 @@ export default function LatestVideoCard({ video }: { video: LatestVideoData }) {
           className="thumb-lg"
           loading="lazy"
         />
-      </a>
-      <a
-        href={video.url}
-        target="_blank"
-        rel="noreferrer"
+      </Link>
+      <Link
+        href={analysisHref(video.videoId, video.isOwn)}
         style={{ color: "var(--ink)", fontWeight: 700, display: "block", marginTop: 10 }}
       >
         {video.title}
-      </a>
+      </Link>
       <div className="perf-grid">
         <div>
           <div className="stat-label">Performance</div>

@@ -611,9 +611,9 @@ export default function CreatePage({
           <div className="create-rail" role="list" aria-label="Double down">
             {doubleDown.map((d) => (
               <div key={d.videoId} className="card create-dd-card" role="listitem">
-                <a href={d.url} target="_blank" rel="noreferrer" style={{ color: "var(--ink)", fontWeight: 700 }}>
+                <Link href={`/optimize/${d.videoId}`} style={{ color: "var(--ink)", fontWeight: 700 }}>
                   {d.title}
-                </a>
+                </Link>
                 <p className="small muted" style={{ margin: "6px 0" }}>{d.why}</p>
                 <p style={{ marginBottom: 10 }}>
                   <strong>Sequel idea:</strong> {d.sequel}
@@ -639,9 +639,9 @@ export default function CreatePage({
           <div className="create-rail" role="list" aria-label="Remix ideas">
             {remix.map((r) => (
               <div key={r.videoId} className="card create-dd-card" role="listitem">
-                <a href={r.url} target="_blank" rel="noreferrer" style={{ color: "var(--ink)", fontWeight: 700 }}>
+                <Link href={`/optimize/${r.videoId}`} style={{ color: "var(--ink)", fontWeight: 700 }}>
                   {r.title}
-                </a>
+                </Link>
                 <p className="small muted" style={{ margin: "6px 0" }}>
                   {r.vph.toLocaleString("en-US")} views per hour right now.
                 </p>

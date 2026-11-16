@@ -23,7 +23,6 @@ export const PLANS: Plan[] = [
       "SEO pack generator (titles, tags, hashtags)",
       "Thumbnail Studio (canvas composer)",
       "Daily trending keywords (US + Pakistan)",
-      "Voiceover generation (3/day, fair use)",
       "1 saved package at a time",
     ],
   },

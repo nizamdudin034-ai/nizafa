@@ -120,3 +120,104 @@ export async function fetchVideoMeta(
   }
   return out;
 }
+
+// ── Public video info (title, channel, views, description, tags) ───────
+// videos.list part=snippet,statistics — 1 quota unit for up to 50 ids.
+// Used by the /analyze view for videos that are not in Nizafa's cache
+// (competitor / research / trending videos). Same 6h yt_cache pattern as
+// fetchVideoMeta; callers must handle a missing entry honestly.
+
+export type VideoPublicMeta = {
+  videoId: string;
+  title: string;
+  channelId: string;
+  channelTitle: string;
+  publishedAt: string | null;
+  viewCount: number | null;
+  likeCount: number | null;
+  commentCount: number | null;
+  description: string;
+  tags: string[];
+};
+
+export async function fetchVideoPublicMeta(
+  videoIds: string[]
+): Promise<Map<string, VideoPublicMeta>> {
+  const out = new Map<string, VideoPublicMeta>();
+  const ids = [...new Set(videoIds.filter(Boolean))];
+  if (ids.length === 0) return out;
+  const key = process.env.YOUTUBE_API_KEY;
+  if (!key) return out;
+
+  const cacheKey = `video-public:v1:${[...ids].sort().join(",")}`;
+  try {
+    const admin = createSupabaseAdmin();
+    const { data: cached } = await admin
+      .from("yt_cache")
+      .select("payload,fetched_at")
+      .eq("cache_key", cacheKey)
+      .maybeSingle();
+    const fresh =
+      cached &&
+      Date.now() - new Date(cached.fetched_at as string).getTime() < CACHE_TTL_MS;
+    if (fresh && Array.isArray(cached.payload)) {
+      for (const m of cached.payload as VideoPublicMeta[]) {
+        if (m?.videoId) out.set(m.videoId, m);
+      }
+      return out;
+    }
+
+    const params = new URLSearchParams({
+      part: "snippet,statistics",
+      id: ids.join(","),
+      key,
+    });
+    const res = await fetch(`${YT}/videos?${params.toString()}`);
+    if (!res.ok) return out;
+    const data = (await res.json()) as {
+      items?: Array<{
+        id: string;
+        snippet?: {
+          title?: string;
+          description?: string;
+          tags?: string[];
+          channelId?: string;
+          channelTitle?: string;
+          publishedAt?: string;
+        };
+        statistics?: {
+          viewCount?: string;
+          likeCount?: string;
+          commentCount?: string;
+        };
+      }>;
+    };
+    for (const it of data.items ?? []) {
+      const meta: VideoPublicMeta = {
+        videoId: it.id,
+        title: it.snippet?.title ?? "",
+        channelId: it.snippet?.channelId ?? "",
+        channelTitle: it.snippet?.channelTitle ?? "",
+        publishedAt: it.snippet?.publishedAt ?? null,
+        viewCount: it.statistics?.viewCount ? Number(it.statistics.viewCount) : null,
+        likeCount: it.statistics?.likeCount ? Number(it.statistics.likeCount) : null,
+        commentCount: it.statistics?.commentCount
+          ? Number(it.statistics.commentCount)
+          : null,
+        description: it.snippet?.description ?? "",
+        tags: it.snippet?.tags ?? [],
+      };
+      if (meta.title) out.set(it.id, meta);
+    }
+    const payload = [...out.values()];
+    if (payload.length > 0) {
+      await admin.from("yt_cache").upsert(
+        { cache_key: cacheKey, payload, fetched_at: new Date().toISOString() },
+        { onConflict: "cache_key" }
+      );
+    }
+  } catch {
+    // Live metadata is a bonus — the pages render from cached data.
+  }
+  return out;
+}

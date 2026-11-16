@@ -11,14 +11,30 @@
 // lines); the punch word inside a solid RED box. Subject imagery fills
 // the left/centre. FACE RULE: the ONLY face in the thumbnail is the
 // person the video is about (supplied via the reference face upload) —
-// NEVER the channel owner's / creator's face. Text is added afterwards
-// in the editor with real fonts, never baked into generated art.
+// NEVER the channel owner's / creator's face.
+//
+// WORKFLOW (user-confirmed 16 Nov 2026): the user takes this prompt and
+// generates the image himself in FLUX. FLUX renders text well, so the
+// prompt CARRIES the exact on-image text — the exact words, their
+// placement (across the TOP, max 2 lines) and their style (see
+// textSpecToPromptLines in lib/thumbnail-text.ts). The old "never bake
+// text into generated art" rule was for other models and does NOT apply
+// to this FLUX workflow. The canvas editor in Thumbnail Studio stays as
+// the fallback for adjusting the text afterwards.
+
+import {
+  defaultTextSpec,
+  textSpecToPromptLines,
+  type ThumbnailTextSpec,
+} from "./thumbnail-text";
 
 export type ThumbnailPromptInput = {
   topic: string;
   subject?: string;
   mood?: "dramatic" | "bold" | "curious" | "urgent" | "hopeful";
   punchWords?: string;
+  /** Main top text. When omitted it is derived from the topic. */
+  topText?: string;
   /** Style notes from a reference thumbnail (style only, never its content). */
   styleNotes?: string;
 };
@@ -53,11 +69,12 @@ const MOOD_LINES: Record<NonNullable<ThumbnailPromptInput["mood"]>, string> = {
 /**
  * House-style thumbnail prompt (decided 16 Nov 2026 from the user's 6
  * example thumbnails): cinematic, dark and moody, red + blue rim light,
- * subject imagery left/centre, the subject's face on the right third,
- * and clear space at the TOP for text. Text is added afterwards in the
- * editor with real fonts — never baked into generated art. The punch
- * word goes in a solid red box at the top. When styleNotes are given
- * (from a reference thumbnail, style only), they are appended as guidance.
+ * subject imagery left/centre, the subject's face on the right third.
+ * The prompt CARRIES the exact on-image text — the user generates the
+ * image in FLUX from this prompt, and FLUX renders the text directly in
+ * the image (exact words, across the TOP, max 2 lines, distressed white;
+ * punch word in a solid red box). When styleNotes are given (from a
+ * reference thumbnail, style only), they are appended as guidance.
  */
 export function buildThumbnailPrompt(input: ThumbnailPromptInput): string {
   const topic = input.topic.trim();
@@ -65,6 +82,12 @@ export function buildThumbnailPrompt(input: ThumbnailPromptInput): string {
   const mood = input.mood ?? "dramatic";
   const punch = (input.punchWords ?? "").trim();
   const styleNotes = (input.styleNotes ?? "").trim();
+  // The exact on-image text: explicit topText wins, otherwise it is
+  // derived from the topic; the punch word comes from the form.
+  const spec: ThumbnailTextSpec = {
+    ...defaultTextSpec(topic, punch),
+    ...(input.topText?.trim() ? { topText: input.topText.trim() } : {}),
+  };
   const lines = [
     `YouTube thumbnail, 16:9, 1280x720, cinematic documentary style, for a video about: ${topic}.`,
     "Dark, moody background, almost black, with strong red rim light on one side and blue rim light on the other, high contrast, photorealistic, sharp focus.",
@@ -74,11 +97,9 @@ export function buildThumbnailPrompt(input: ThumbnailPromptInput): string {
     "Left and centre: one strong cinematic image that proves the story — the key visual of the topic (a place, a document, an object, a moment), filling the frame, not a generic stock photo. No clutter, no extra faces.",
     `Mood: ${MOOD_LINES[mood]}.`,
     styleNotes ? `Style reference (layout, colours and feel only): ${styleNotes}` : "",
-    "Layout: leave clear space across the TOP of the frame for text (two lines). NO text baked into the image — the text will be added afterwards in the editor with real fonts.",
-    punch
-      ? `The text added later reads: the main line in huge bold distressed white letters across the top, and the punch word "${punch}" in huge white letters inside a solid RED box.`
-      : "The text added later will be short — a few huge bold distressed white words across the top, with one punch word in huge white letters inside a solid RED box.",
-    "Style: cinematic, dramatic, high contrast, no watermark, no logo, no text in the image itself.",
+    "Layout: the text sits across the TOP of the frame (two lines at most), subject imagery left/centre, face on the right third — nothing else in the frame.",
+    ...textSpecToPromptLines(spec),
+    "Style: cinematic, dramatic, high contrast, no watermark, no logo, no text other than the exact words above.",
   ];
   return lines.filter((l) => l.length > 0).join("\n");
 }

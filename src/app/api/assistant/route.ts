@@ -5,14 +5,20 @@ import {
   answerFromData,
   buildAnswer,
   detectDataIntent,
-  detectLanguage,
+  detectLanguageDetailed,
   emptyDataBundle,
   FALLBACK,
   normalizeQuestion,
   type AssistantDataBundle,
+  type AssistantLang,
   type ChannelContext,
   type DataIntent,
 } from "@/lib/assistant";
+import {
+  isAssistantLang,
+  isChannelQuestion,
+  langInfo,
+} from "@/lib/assistant-i18n";
 import { bestPostingTimes, computeAudit, scoreVideoSeo } from "@/lib/audit";
 import { ensureDailyIdeasForChannel } from "@/lib/daily-ideas";
 import { consistencyForPack, type StoredPack } from "@/lib/consistency";
@@ -232,10 +238,45 @@ async function saveExchange(
   }
 }
 
+/** The user's last Assistant language, from their own chat history
+ *  (existing chat_messages — no new table). Used only when the new
+ *  message gives no clear language signal of its own. */
+async function getLastAssistantLang(
+  admin: ReturnType<typeof createSupabaseAdmin>,
+  userId: string
+): Promise<AssistantLang | null> {
+  try {
+    const { data: convs } = await admin
+      .from("chat_conversations")
+      .select("id")
+      .eq("user_id", userId)
+      .order("updated_at", { ascending: false })
+      .limit(3);
+    if (!convs?.length) return null;
+    const ids = (convs as Array<{ id: number }>).map((c) => c.id);
+    const { data: msgs } = await admin
+      .from("chat_messages")
+      .select("content")
+      .eq("role", "user")
+      .in("conversation_id", ids)
+      .order("created_at", { ascending: false })
+      .limit(3);
+    for (const m of (msgs ?? []) as Array<{ content: string }>) {
+      const d = detectLanguageDetailed(m.content);
+      if (d.confidence === "high") return d.lang;
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
 export async function POST(req: Request) {
   const body = (await req.json().catch(() => ({}))) as {
     message?: string;
     conversationId?: number | string;
+    /** Explicit language from the chat UI's selector. */
+    lang?: string;
   };
   const message = (body.message ?? "").trim();
   if (!message) {
@@ -244,16 +285,47 @@ export async function POST(req: Request) {
   if (message.length > 1000) {
     return NextResponse.json({ error: "Message is too long (max 1000 characters)." }, { status: 400 });
   }
-  const lang = detectLanguage(message);
+
+  const user = await getSessionUser();
+
+  // Language resolution, in order:
+  //  1. a clear signal in this message (script or distinctive words) —
+  //     a mid-chat language switch is honoured per message;
+  //  2. the language the user picked in the chat UI;
+  //  3. the language of their last message to the Assistant (chat
+  //     history), so a short follow-up ("hi", "thanks", "اور؟") keeps
+  //     answering in the same language;
+  //  4. English.
+  const detected = detectLanguageDetailed(message);
+  let lang: AssistantLang = "en";
+  let langSource: "detected" | "selected" | "history" | "default" = "default";
+  if (detected.confidence === "high") {
+    lang = detected.lang;
+    langSource = "detected";
+  } else if (typeof body.lang === "string" && isAssistantLang(body.lang)) {
+    lang = body.lang;
+    langSource = "selected";
+  } else if (user && isSupabaseConfigured()) {
+    try {
+      const fromHistory = await getLastAssistantLang(
+        createSupabaseAdmin(),
+        user.id
+      );
+      if (fromHistory) {
+        lang = fromHistory;
+        langSource = "history";
+      }
+    } catch {
+      // History is a bonus; never block the answer on it.
+    }
+  }
+
   const norm = normalizeQuestion(message);
   const dataIntent = detectDataIntent(message);
 
   // Channel-grounded answers are live data: never served from the cache.
   // Data-intent answers are live too (audit, ideas, latest video, …).
-  const isChannelQuestion =
-    /channel|my channel|subscrib|views|video|perform|how (am|is)|doing|growth|میرا چینل|سبسکرائبر|ویوز|ویڈیو|کیسا/.test(
-      message.toLowerCase()
-    );
+  const isChannelQ = isChannelQuestion(message);
 
   let cached = false;
   let answer: string | null = null;
@@ -262,7 +334,7 @@ export async function POST(req: Request) {
   if (isSupabaseConfigured()) {
     try {
       const admin = createSupabaseAdmin();
-      if (!isChannelQuestion && !dataIntent && norm) {
+      if (!isChannelQ && !dataIntent && norm) {
         const { data: hit } = await admin
           .from("assistant_cache")
           .select("answer,hits")
@@ -290,7 +362,6 @@ export async function POST(req: Request) {
   // Data intent (ideas / views / audit / latest-video review / script /
   // community post): answer from live channel data, never from the cache.
   if (dataIntent) {
-    const user = await getSessionUser();
     let data: AssistantDataBundle = emptyDataBundle();
     if (user && isSupabaseConfigured()) {
       try {
@@ -312,6 +383,8 @@ export async function POST(req: Request) {
     return NextResponse.json({
       answer,
       lang,
+      langName: langInfo(lang).native,
+      langSource,
       cached: false,
       grounded: true,
       conversationId,
@@ -319,7 +392,6 @@ export async function POST(req: Request) {
   }
 
   if (!answer) {
-    const user = await getSessionUser();
     let channel: ChannelContext | null = null;
     if (user && isSupabaseConfigured()) {
       try {
@@ -329,7 +401,7 @@ export async function POST(req: Request) {
         channel = null;
       }
     }
-    const built = buildAnswer(message, channel);
+    const built = buildAnswer(message, channel, lang);
     answer = built.answer;
     grounded = built.grounded;
 
@@ -387,5 +459,13 @@ export async function POST(req: Request) {
     }
   }
 
-  return NextResponse.json({ answer, lang, cached, grounded, conversationId });
+  return NextResponse.json({
+    answer,
+    lang,
+    langName: langInfo(lang).native,
+    langSource,
+    cached,
+    grounded,
+    conversationId,
+  });
 }

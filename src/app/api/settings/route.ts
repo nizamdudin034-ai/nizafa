@@ -48,9 +48,6 @@ export async function GET() {
   return NextResponse.json({
     configured: isSupabaseConfigured(),
     youtubeApiKeySet: Boolean(process.env.YOUTUBE_API_KEY),
-    elevenlabsKeySet: Boolean(
-      process.env.ELEVENLABS_API_KEY || settings.elevenlabs_api_key
-    ),
     googleOAuthSet: Boolean(process.env.GOOGLE_CLIENT_ID && process.env.GOOGLE_CLIENT_SECRET),
     signedIn: !!user,
     email: user?.email ?? null,
@@ -83,31 +80,8 @@ export async function POST(req: Request) {
     easypaisaNumber?: string;
     jazzcashNumber?: string;
     paymentNote?: string;
-    elevenlabsApiKey?: string;
   };
   const rows: Array<{ key: string; value: string }> = [];
-  // ElevenLabs key (voiceover on /generate). Empty string removes it.
-  // The value is NEVER returned by GET — only a set / not-set boolean.
-  // The ELEVENLABS_API_KEY env var (Netlify) takes precedence over this row.
-  if (body.elevenlabsApiKey !== undefined) {
-    const v = body.elevenlabsApiKey.trim();
-    if (v && !/^sk_[A-Za-z0-9]{16,}$/.test(v)) {
-      return NextResponse.json(
-        { error: "That doesn't look like an ElevenLabs API key (it starts with sk_)." },
-        { status: 400 }
-      );
-    }
-    if (!v) {
-      const admin = createSupabaseAdmin();
-      const { error } = await admin
-        .from("settings")
-        .delete()
-        .eq("key", "elevenlabs_api_key");
-      if (error) return NextResponse.json({ error: error.message }, { status: 500 });
-      return NextResponse.json({ ok: true, elevenlabsRemoved: true });
-    }
-    rows.push({ key: "elevenlabs_api_key", value: v });
-  }
   if (body.easypaisaNumber !== undefined) {
     const v = body.easypaisaNumber.trim();
     if (v && !/^\+?[0-9\s-]{7,20}$/.test(v)) {

@@ -10,6 +10,7 @@ import TagsCard from "@/components/TagsCard";
 import LatestVideoCard, { type LatestVideoData } from "@/components/LatestVideoCard";
 import { scoreConsistency, scoreTag } from "@/lib/consistency";
 import { topicKeywords, type SeoPack } from "@/lib/generator";
+import { analysisHref } from "@/lib/video-links";
 
 export const dynamic = "force-dynamic";
 
@@ -183,6 +184,7 @@ export default async function Home({
         ageHours < 48
           ? "Too early"
           : `#${rank} of ${videos.length} by views/hour`,
+      isOwn: selected?.role === "own",
     };
   }
 
@@ -215,12 +217,23 @@ export default async function Home({
       }),
       alternatives: (pack.titles ?? [])
         .filter((t) => t.title !== currentTitle)
-        .map((t) => ({
-          title: t.title,
-          score: scoreConsistency({ title: t.title, description, scriptText, thumbnailText }).score,
-          titleScore: t.score,
-          why: t.why,
-        }))
+        .map((t) => {
+          const c = scoreConsistency({
+            title: t.title,
+            description,
+            scriptText,
+            thumbnailText,
+          });
+          return {
+            title: t.title,
+            // Title match = mean of the three title parts (same as the
+            // Analysis suggestions); consistencyScore = overall score.
+            score: Math.round((c.parts[0].score + c.parts[1].score + c.parts[2].score) / 3),
+            consistencyScore: c.score,
+            titleScore: t.score,
+            why: t.why,
+          };
+        })
         .sort((a, b) => b.score - a.score || b.titleScore - a.titleScore)
         .slice(0, 3),
     };
@@ -406,9 +419,9 @@ export default async function Home({
                     {topVideos.map((v) => (
                       <div key={v.video_id}>
                         <div style={{ display: "flex", justifyContent: "space-between", gap: 8 }}>
-                          <a href={v.url} target="_blank" rel="noreferrer" className="small" style={{ color: "var(--ink)" }}>
+                          <Link href={analysisHref(v.video_id, selected?.role === "own")} className="small" style={{ color: "var(--ink)" }}>
                             {v.title.slice(0, 64)}
-                          </a>
+                          </Link>
                           <strong className="small" style={{ whiteSpace: "nowrap" }}>{vph(v)}/h</strong>
                         </div>
                         <div style={{ height: 8, background: "var(--surface-2)", borderRadius: 999, marginTop: 4 }}>
@@ -457,9 +470,9 @@ export default async function Home({
                     videos.slice(0, 5).map((v) => (
                       <div className="list-row" key={v.video_id}>
                         <div style={{ minWidth: 0 }}>
-                          <a href={v.url} target="_blank" rel="noreferrer" style={{ color: "var(--ink)", fontWeight: 600 }}>
+                          <Link href={analysisHref(v.video_id, selected?.role === "own")} style={{ color: "var(--ink)", fontWeight: 600 }}>
                             {v.title}
-                          </a>
+                          </Link>
                           <div className="small muted">
                             {fmt(v.view_count)} views · {fmt(v.like_count)} likes ·{" "}
                             {v.published_at ? new Date(v.published_at).toLocaleDateString() : "—"}

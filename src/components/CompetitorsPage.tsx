@@ -11,7 +11,9 @@
 //   (views vs that channel's own saved-video average).
 import { useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
+import Link from "next/link";
 import { fmtViews, thumbUrl, timeAgo } from "@/lib/seo-checklist";
+import { analysisHref } from "@/lib/video-links";
 import type { GrowthResult } from "@/lib/channel-snapshots";
 
 export type CompetitorItem = {
@@ -429,13 +431,13 @@ export default function CompetitorsPage({
               <div className="comp-video-list">
                 {topVideos.map((v) => (
                   <div key={v.videoId} className="comp-video-row">
-                    <a href={v.url} target="_blank" rel="noreferrer" className="comp-video-thumb">
+                    <Link href={analysisHref(v.videoId, v.isOwn)} className="comp-video-thumb">
                       <img src={thumbUrl(v.videoId, "mq")} alt="" loading="lazy" />
-                    </a>
+                    </Link>
                     <div className="comp-video-body">
-                      <a href={v.url} target="_blank" rel="noreferrer" className="comp-video-title">
+                      <Link href={analysisHref(v.videoId, v.isOwn)} className="comp-video-title">
                         {v.title}
-                      </a>
+                      </Link>
                       <div className="small muted">
                         {v.channelTitle}
                         {v.isOwn ? " · yours" : ""} • {timeAgo(v.publishedAt)}

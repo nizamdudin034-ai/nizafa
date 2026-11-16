@@ -5,7 +5,9 @@
 //  - apply: saves `title` as the pack's chosen title (bestTitle +
 //    chosenTitle + chosenAt in payload_json) and returns the fresh score.
 // Scores are computed from the saved pack text only — nothing is invented.
-// Regenerate cycles variant 0 (the pack's own titles) → 1 → 2 → 0.
+// Regenerate cycles variant 0 (topic-led) → 1 (question/how) → 2 (punch-led);
+// every variant scores its titles with the same real consistency scorer and
+// returns the top 3 by title match (mean of the three title parts).
 import { NextResponse } from "next/server";
 import { createSupabaseAdmin, isSupabaseConfigured } from "@/lib/supabase-server";
 import {

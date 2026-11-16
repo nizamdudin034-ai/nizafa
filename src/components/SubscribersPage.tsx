@@ -9,7 +9,9 @@
 //   among the user's own + tracked competitor channels and the top channels
 //   in the niche — labelled honestly as such, never as subscriber data.
 import { Fragment, useMemo, useState } from "react";
+import Link from "next/link";
 import { fmtViews, thumbUrl, timeAgo } from "@/lib/seo-checklist";
+import { analysisHref } from "@/lib/video-links";
 
 export type SubscriberVideoItem = {
   videoId: string;
@@ -207,13 +209,13 @@ export default function SubscribersPage({
               <div className="comp-video-list">
                 {sortedVideos.map((v) => (
                   <div key={v.videoId} className="comp-video-row">
-                    <a href={v.url} target="_blank" rel="noreferrer" className="comp-video-thumb">
+                    <Link href={analysisHref(v.videoId, v.isOwn)} className="comp-video-thumb">
                       <img src={thumbUrl(v.videoId, "mq")} alt="" loading="lazy" />
-                    </a>
+                    </Link>
                     <div className="comp-video-body">
-                      <a href={v.url} target="_blank" rel="noreferrer" className="comp-video-title">
+                      <Link href={analysisHref(v.videoId, v.isOwn)} className="comp-video-title">
                         {v.title}
-                      </a>
+                      </Link>
                       <div className="small muted">
                         {v.channelTitle}
                         {v.isOwn ? " · yours" : ""} • {timeAgo(v.publishedAt)}

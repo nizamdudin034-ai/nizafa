@@ -1,7 +1,7 @@
 import { createSupabaseServer, isSupabaseConfigured } from "@/lib/supabase-server";
 import { getSessionUser } from "@/lib/auth";
 import { SectionTitle } from "@/components/ui";
-import AssistantChat, { type AssistantCard } from "@/components/AssistantChat";
+import AssistantChat from "@/components/AssistantChat";
 import type { TrendItem } from "@/lib/trends";
 
 export const dynamic = "force-dynamic";
@@ -86,56 +86,16 @@ export default async function AssistantPage() {
     }
   }
 
-  const cards: AssistantCard[] = [
-    {
-      icon: "bulb",
-      title: "Give me video ideas",
-      sub: "Personalized ideas based on your niche",
-      prompt: "Give me video ideas for my channel",
-    },
-    {
-      icon: "trend",
-      title: "Get more views",
-      sub: "Tips tailored to your channel",
-      prompt: "How can I get more views on my channel?",
-    },
-    {
-      icon: "eye",
-      title: "Channel audit",
-      sub: "A full review of what to improve",
-      prompt: "Run a channel audit for my channel",
-    },
-    {
-      icon: "video",
-      title: "Review my latest video",
-      sub: "Get actionable feedback on your content",
-      prompt: "Review my latest video",
-    },
-    {
-      icon: "doc",
-      title: "Write a script",
-      sub: scriptTopic
-        ? `Try a script about ${scriptTopic}`
-        : "Try a script about your niche",
-      prompt: scriptTopic
-        ? `Write a script about ${scriptTopic}`
-        : "Write a video script",
-    },
-    {
-      icon: "chat",
-      title: "Community post",
-      sub: "Draft a post to engage your audience",
-      prompt: "Draft a community post to engage my audience",
-    },
-  ];
-
+  // Suggestion cards are localised client-side (see AssistantChat):
+  // the server only supplies the script topic; titles, subs and
+  // prompts come from the Assistant's language tables.
   return (
     <>
       <AssistantChat
         greetingName={greetingName}
         channelTitle={channelTitle}
         channelAvatar={channelAvatar}
-        cards={cards}
+        scriptTopic={scriptTopic}
       />
 
       <section className="section">

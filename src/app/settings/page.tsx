@@ -19,7 +19,6 @@ type SettingsInfo = {
   jazzcashNumber: string;
   easypaisaSet: boolean;
   jazzcashSet: boolean;
-  elevenlabsKeySet: boolean;
   paymentNote: string;
 };
 
@@ -37,7 +36,6 @@ export default function SettingsPage() {
   const [newKey, setNewKey] = useState<string | null>(null);
   const [easypaisa, setEasypaisa] = useState("");
   const [jazzcash, setJazzcash] = useState("");
-  const [elevenlabsKey, setElevenlabsKey] = useState("");
   const [paymentNote, setPaymentNote] = useState("");
   const [memberName, setMemberName] = useState("");
   const [memberEmail, setMemberEmail] = useState("");
@@ -83,50 +81,6 @@ export default function SettingsPage() {
       await load();
     } catch (e2) {
       setErr(e2 instanceof Error ? e2.message : "Could not save settings.");
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  async function saveElevenlabsKey(e: React.FormEvent) {
-    e.preventDefault();
-    setBusy(true);
-    setMsg(null);
-    setErr(null);
-    try {
-      const res = await fetch("/api/settings", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ elevenlabsApiKey: elevenlabsKey }),
-      });
-      const data = (await res.json()) as { error?: string };
-      if (!res.ok) throw new Error(data.error ?? "Could not save the key.");
-      setElevenlabsKey("");
-      setMsg("ElevenLabs key saved — voiceover is now available on the Generate page.");
-      await load();
-    } catch (e2) {
-      setErr(e2 instanceof Error ? e2.message : "Could not save the key.");
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  async function removeElevenlabsKey() {
-    setBusy(true);
-    setMsg(null);
-    setErr(null);
-    try {
-      const res = await fetch("/api/settings", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ elevenlabsApiKey: "" }),
-      });
-      const data = (await res.json()) as { error?: string };
-      if (!res.ok) throw new Error(data.error ?? "Could not remove the key.");
-      setMsg("ElevenLabs key removed — voiceover generation is off (browser preview still works).");
-      await load();
-    } catch (e2) {
-      setErr(e2 instanceof Error ? e2.message : "Could not remove the key.");
     } finally {
       setBusy(false);
     }
@@ -292,51 +246,6 @@ export default function SettingsPage() {
                 <button type="submit" className="btn btn-primary" disabled={busy}>
                   {busy ? "Saving…" : "Save payment details"}
                 </button>
-              </div>
-            </form>
-          </div>
-        </section>
-      ) : null}
-
-      {info?.isOwner ? (
-        <section className="section">
-          <SectionTitle title="Owner — voiceover (ElevenLabs)" sub="Powers the Voiceover section on the Generate page. The key is stored server-side only and never shown again." />
-          <div className="card">
-            <p style={{ marginTop: 0 }}>
-              ElevenLabs key{" "}
-              <StatusBadge ok={info?.elevenlabsKeySet ?? false} />
-            </p>
-            <form onSubmit={saveElevenlabsKey} style={{ display: "grid", gap: 12 }}>
-              <div>
-                <label className="label" htmlFor="set-elevenlabs">ElevenLabs API key</label>
-                <input
-                  id="set-elevenlabs"
-                  className="input"
-                  type="password"
-                  value={elevenlabsKey}
-                  onChange={(e) => setElevenlabsKey(e.target.value)}
-                  placeholder="sk_… (paste a new key to replace the saved one)"
-                  autoComplete="off"
-                />
-              </div>
-              <p className="small muted" style={{ margin: 0 }}>
-                Get a key at{" "}
-                <a href="https://elevenlabs.io/app/settings/api-keys" target="_blank" rel="noreferrer">
-                  elevenlabs.io → Settings → API keys
-                </a>
-                . Your ElevenLabs plan pays for the audio (free tier: 10,000 characters a month).
-                Nizafa itself adds a fair-use limit of 3 voiceovers a day per user. You can also
-                set ELEVENLABS_API_KEY in Netlify instead — the env var takes precedence.
-              </p>
-              <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-                <button type="submit" className="btn btn-primary" disabled={busy || !elevenlabsKey.trim()}>
-                  {busy ? "Saving…" : "Save ElevenLabs key"}
-                </button>
-                {info?.elevenlabsKeySet ? (
-                  <button type="button" className="btn btn-ghost" disabled={busy} onClick={removeElevenlabsKey}>
-                    Remove key
-                  </button>
-                ) : null}
               </div>
             </form>
           </div>

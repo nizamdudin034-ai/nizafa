@@ -13,6 +13,7 @@ import CopyButton from "@/components/CopyButton";
 import { EmptyState, SectionTitle } from "@/components/ui";
 import type { DailyIdea, ViewPrediction } from "@/lib/daily-ideas";
 import { fmtViews, thumbUrl, timeAgo } from "@/lib/seo-checklist";
+import { analysisHref } from "@/lib/video-links";
 
 type IdeasResult = {
   date: string;
@@ -323,11 +324,9 @@ export default function IdeasPage() {
                         />
                       ) : null}
                       {related?.map((v) => (
-                        <a
+                        <Link
                           key={v.videoId}
-                          href={`https://www.youtube.com/watch?v=${v.videoId}`}
-                          target="_blank"
-                          rel="noreferrer"
+                          href={analysisHref(v.videoId, false)}
                           className="idea-related-row"
                         >
                           {/* eslint-disable-next-line @next/next/no-img-element */}
@@ -340,7 +339,7 @@ export default function IdeasPage() {
                               {v.viewCount != null ? ` • ${fmtViews(v.viewCount)} views` : ""}
                             </span>
                           </span>
-                        </a>
+                        </Link>
                       ))}
                     </div>
                   ) : null}

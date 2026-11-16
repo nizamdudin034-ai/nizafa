@@ -12,8 +12,13 @@
 // the left/centre. FACE RULE: the ONLY face in the thumbnail is the
 // person the video is about (supplied via the reference face upload) —
 // NEVER the channel owner's / creator's face.
-// Text is added afterwards in the editor with real fonts — never baked
-// into generated art.
+//
+// WORKFLOW (user-confirmed 16 Nov 2026): the user takes Nizafa's prompt
+// and generates the image himself in FLUX — the prompt carries the exact
+// on-image text, so FLUX renders the text right in the image. The canvas
+// editor below stays as the fallback: the text is drawn there with real
+// fonts, stays editable, and Download PNG always exports the composed
+// canvas — text included, never a bare image.
 //
 // Everything visual here runs in the browser: reference images are
 // analysed on an offscreen canvas and are NEVER uploaded or stored
@@ -30,6 +35,7 @@ import {
   scoreThumbnailConcept,
   type ThumbnailPromptInput,
 } from "@/lib/thumbnail";
+import { defaultTextSpec, drawThumbnailText } from "@/lib/thumbnail-text";
 import type { SavedThumbnail } from "@/app/api/thumbnails/saved/route";
 
 type SizeKey = "16:9" | "9:16" | "1:1";
@@ -96,23 +102,6 @@ function rgbToHex(r: number, g: number, b: number): string {
   return `${hex(r)}${hex(g)}${hex(b)}`;
 }
 
-function fitFont(
-  ctx: CanvasRenderingContext2D,
-  text: string,
-  maxWidth: number,
-  startPx: number,
-  family: string,
-  weight = 800
-): number {
-  let px = startPx;
-  while (px > 18) {
-    ctx.font = `${weight} ${px}px ${family}`;
-    if (ctx.measureText(text).width <= maxWidth) break;
-    px -= 4;
-  }
-  return px;
-}
-
 /** Face photo cropped to the face zone with a feathered left edge, so the
  * cutout blends into the background instead of showing a hard rectangle. */
 function featheredFace(face: HTMLImageElement, fw: number, fh: number): HTMLCanvasElement {
@@ -170,6 +159,10 @@ export default function ThumbnailsPage() {
       };
       if (data.status === "ok" && data.imageUrl) {
         setGenImage(data.imageUrl);
+        // Text ON by default: fill the top text + punch word from the
+        // form so the editor preview shows the composed thumbnail, not a
+        // bare image. Never overwrites text the user typed.
+        applyDefaultText();
       } else {
         setGenNote(
           data.reason ?? data.error ?? "Image generation is not available right now."
@@ -199,6 +192,45 @@ export default function ThumbnailsPage() {
   const [fontFamily, setFontFamily] = useState(FONTS[0].value);
   const [composerError, setComposerError] = useState<string | null>(null);
   const [editorNote, setEditorNote] = useState<string | null>(null);
+
+  // True once the user has typed the top text or punch word themselves.
+  // Auto-text (below) only fills empty fields before that point.
+  const textTouchedRef = useRef(false);
+
+  /** Fill the top text + punch word from the topic/punch-words form when
+   *  both are still empty and the user has not typed them — so the editor
+   *  preview (and the downloaded PNG) shows the composed thumbnail with
+   *  its text, never a bare image. */
+  function applyDefaultText() {
+    if (textTouchedRef.current) return;
+    if (topText.trim() || punchWord.trim()) return;
+    const spec = defaultTextSpec(topic, punchWords);
+    if (spec.topText) setTopText(spec.topText);
+    if (spec.punchWord) setPunchWord(spec.punchWord);
+  }
+
+  // Prefill from an Analysis thumbnail concept (?topText=&punch=&topic=&notes=).
+  // Runs once on mount; the fields stay editable afterwards.
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const topTextParam = params.get("topText") ?? "";
+    const punchParam = params.get("punch") ?? "";
+    const topicParam = params.get("topic") ?? "";
+    const notesParam = params.get("notes") ?? "";
+    if (!topTextParam && !punchParam && !topicParam && !notesParam) return;
+    if (topTextParam) setTopText(topTextParam);
+    if (punchParam) {
+      setPunchWord(punchParam);
+      setPunchWords(punchParam);
+    }
+    if (topicParam) setTopic(topicParam);
+    if (notesParam) setStyleNotes(notesParam);
+    setEditorNote(
+      "Concept loaded from Analysis — edit the text and image below, then download. " +
+        "A downloaded thumbnail is a file for YouTube Studio; Nizafa does not change the thumbnail on YouTube directly."
+    );
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -249,51 +281,18 @@ export default function ThumbnailsPage() {
       ctx.stroke();
     }
 
-    // Top text: main line in huge bold distressed white, punch word in a
-    // solid box underneath. Letter-spacing gives the heavy, spaced look
-    // of the reference thumbnails.
-    if (showText) {
-      const main = topText.trim();
-      const punch = punchWord.trim();
-      const ctxLS = ctx as CanvasRenderingContext2D & { letterSpacing?: string };
-      ctxLS.letterSpacing = "2px";
-      let y = Math.round(h * 0.045);
-      ctx.textAlign = "center";
-      ctx.textBaseline = "top";
-      ctx.shadowColor = "rgba(0,0,0,0.65)";
-      ctx.shadowBlur = 10;
-      ctx.shadowOffsetY = 3;
-      if (main) {
-        const mainPx = fitFont(ctx, main.toUpperCase(), w * 0.92, Math.round(h * 0.11), fontFamily, 900);
-        ctx.fillStyle = textColor;
-        ctx.font = `900 ${mainPx}px ${fontFamily}`;
-        ctx.fillText(main.toUpperCase(), w / 2, y);
-        y += Math.round(mainPx * 1.18);
-      }
-      if (punch) {
-        const punchPx = fitFont(ctx, punch.toUpperCase(), w * 0.86, Math.round(h * 0.13), fontFamily, 900);
-        ctx.font = `900 ${punchPx}px ${fontFamily}`;
-        const tw = ctx.measureText(punch.toUpperCase()).width;
-        const boxPadX = Math.round(punchPx * 0.45);
-        const boxW = tw + boxPadX * 2;
-        const boxH = Math.round(punchPx * 1.45);
-        const boxX = (w - boxW) / 2;
-        ctx.fillStyle = boxColor;
-        ctx.fillRect(boxX, y, boxW, boxH);
-        const lightBox = boxColor.toLowerCase() === "#f5f5f0" || boxColor.toLowerCase() === "#ffffff";
-        ctx.fillStyle = lightBox ? "#d92d20" : "#ffffff";
-        ctx.fillText(punch.toUpperCase(), w / 2, y + Math.round((boxH - punchPx) / 2));
-      }
-      if (!main && !punch) {
-        ctx.fillStyle = "rgba(255,255,255,0.75)";
-        const px = Math.round(h * 0.045);
-        ctx.font = `700 ${px}px ${fontFamily}`;
-        ctx.fillText("YOUR TEXT HERE", w / 2, y);
-      }
-      ctx.shadowBlur = 0;
-      ctx.shadowOffsetY = 0;
-      ctxLS.letterSpacing = "0px";
-    }
+    // Top text: main line(s) in huge bold distressed white across the
+    // top, punch word in a solid red box underneath — drawn by the shared
+    // helper (lib/thumbnail-text.ts), the same one the Generate concept
+    // previews and the Analysis Thumbnail tab use. The preview always
+    // shows the composed thumbnail with its text, and Download PNG
+    // exports this same canvas.
+    drawThumbnailText(
+      ctx,
+      { topText, punchWord, boxColor, textColor, fontFamily, showText },
+      w,
+      h
+    );
   }, [size, preset, bgImage, faceImage, topText, punchWord, boxColor, textColor, showText, fontFamily]);
 
   function downloadPng() {
@@ -323,6 +322,7 @@ export default function ThumbnailsPage() {
       setBgImage(await readFileAsImage(file));
       setBgName(file.name);
       setComposerError(null);
+      applyDefaultText();
     } catch (e) {
       setComposerError(e instanceof Error ? e.message : "Could not load that image.");
     }
@@ -344,8 +344,9 @@ export default function ThumbnailsPage() {
     try {
       const img = await loadRemoteImage(genImage);
       setBgImage(img);
-      setBgName("AI-generated base image");
-      setEditorNote("Generated image loaded as the editor background — add your text below.");
+      setBgName("AI-generated image");
+      applyDefaultText();
+      setEditorNote("Generated image loaded as the editor background — the text from the form is already on it; edit it below if you want.");
     } catch {
       setEditorNote("That image could not be loaded into the editor (its provider blocks cross-origin use). Download it from the preview instead.");
     }
@@ -547,10 +548,11 @@ export default function ThumbnailsPage() {
         <div className="kicker">Thumbnail Studio</div>
         <h1>Thumbnails that get the click</h1>
         <p className="muted">
-          Generate a cinematic base image from a prompt, place the
-          subject&apos;s real face cutout, or match a reference
-          thumbnail&apos;s style — then add the text in the editor with real
-          fonts. Text is never baked into generated art.
+          Generate a cinematic image from a prompt — the prompt includes the
+          exact words for the thumbnail, so FLUX renders the text right in
+          the image. Place the subject&apos;s real face cutout, or match a
+          reference thumbnail&apos;s style — and adjust the text any time in
+          the editor below.
         </p>
         <div className="notice" style={{ marginTop: 12 }}>
           <strong>House style (from your 6 examples):</strong> cinematic
@@ -567,8 +569,9 @@ export default function ThumbnailsPage() {
           <h2 style={{ marginBottom: 4 }}>1 · Generator</h2>
           <p className="small muted">
             Describe the video, attach the subject&apos;s face and/or a
-            reference thumbnail, and generate the base image — without any
-            text in it.
+            reference thumbnail, and generate the image — the prompt carries
+            the exact on-image text (top line + punch word in the red box)
+            for FLUX.
           </p>
           <div className="grid grid-2">
             <div>
@@ -690,7 +693,7 @@ export default function ThumbnailsPage() {
                   {/* eslint-disable-next-line @next/next/no-img-element */}
                   <img
                     src={genImage}
-                    alt="AI-generated thumbnail base image (no text)"
+                    alt="AI-generated thumbnail image (with text)"
                     style={{ width: "100%", borderRadius: 12, marginTop: 12 }}
                   />
                   <div style={{ marginTop: 10 }}>
@@ -714,10 +717,11 @@ export default function ThumbnailsPage() {
         <div className="card">
           <h2 style={{ marginBottom: 4 }}>2 · Editor</h2>
           <p className="small muted">
-            Compose the real thumbnail and download it as a PNG. Big bold
-            text across the top, punch word in a solid red box, subject&apos;s
-            face on the right — all drawn with real fonts. Works fully
-            offline in your browser.
+            Compose the thumbnail and download it as a PNG — the preview
+            always shows the text, and the download includes it. Big bold
+            text across the top, punch word in a solid red box,
+            subject&apos;s face on the right — all drawn with real fonts.
+            Works fully offline in your browser.
           </p>
           <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 12 }}>
             {(Object.keys(SIZES) as SizeKey[]).map((k) => (
@@ -784,7 +788,10 @@ export default function ThumbnailsPage() {
                 id="th-top"
                 className="input"
                 value={topText}
-                onChange={(e) => setTopText(e.target.value)}
+                onChange={(e) => {
+                  setTopText(e.target.value);
+                  textTouchedRef.current = true;
+                }}
                 placeholder="e.g. THE SECRET OF"
               />
               <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginTop: 8 }}>
@@ -819,7 +826,10 @@ export default function ThumbnailsPage() {
                 id="th-punch-word"
                 className="input"
                 value={punchWord}
-                onChange={(e) => setPunchWord(e.target.value)}
+                onChange={(e) => {
+                  setPunchWord(e.target.value);
+                  textTouchedRef.current = true;
+                }}
                 placeholder="e.g. TIME"
               />
               <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginTop: 8 }}>

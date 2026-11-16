@@ -34,22 +34,196 @@ export function alternativesForPack(
   pack: StoredPack,
   currentTitle: string,
   variant: number
-): Array<{ title: string; score: number; titleScore: number; why: string }> {
+): SuggestedTitle[] {
   const texts = packTexts(pack);
-  const pool =
-    variant === 1 || variant === 2
-      ? buildAlternateTitles(pack.topic, pack.channelTitle ?? null, variant)
-      : (pack.titles ?? []);
-  return pool
-    .filter((t) => t.title !== currentTitle)
-    .map((t) => ({
-      title: t.title,
-      score: scoreConsistency({ title: t.title, ...texts }).score,
-      titleScore: t.score,
-      why: t.why,
-    }))
-    .sort((a, b) => b.score - a.score || b.titleScore - a.titleScore)
-    .slice(0, 3);
+  return buildMaxMatchTitles({
+    topic: pack.topic,
+    channelTitle: pack.channelTitle ?? null,
+    description: texts.description,
+    scriptText: texts.scriptText,
+    thumbnailText: texts.thumbnailText,
+    currentTitle,
+    extraTitles: (pack.titles ?? []).map((t) => t.title),
+    variant: variant === 1 || variant === 2 ? variant : 0,
+  });
+}
+
+// ── Max-match title suggestions ──────────────────────────────────────────
+// The Analysis must suggest exactly 3 titles, ranked by TITLE MATCH — the
+// mean of the title↔description, title↔script and title↔thumbnail parts
+// (the three parts a title can actually influence). The overall
+// consistency score also folds in description↔script, which no title can
+// change, so it cannot rank titles; the match below is the ranking score
+// and uses the exact same per-part scoring as the card. A title only
+// reaches >95% match when (nearly) every one of its content words also
+// appears in the description, the script and the thumbnail text — so
+// candidates are built from words that appear in ALL THREE texts (shared
+// words) plus the topic words. If no candidate honestly reaches >95%,
+// callers must show the real scores and say so — never inflate. The
+// channel suffix (" | Nizam Afridi") is left off the candidates: its
+// words appear in the description only, so adding it would drop the
+// match below 95% — the UI says this plainly.
+
+export type SuggestedTitle = {
+  title: string;
+  /** Title match 0–100: mean of title↔description, title↔script and title↔thumbnail. */
+  score: number;
+  /** Overall consistency score (incl. description↔script) for context. */
+  consistencyScore: number;
+  /** Rule-based title quality score (length, number, question, power word, topic keyword). */
+  titleScore: number;
+  why: string;
+};
+
+/** Words present in ALL of description, script and thumbnail text, ranked
+ *  by total frequency — a title built only from these words scores 100 on
+ *  every title part. Topic words come first (they name the video). */
+function sharedWords(
+  topic: string,
+  description: string,
+  scriptText: string,
+  thumbnailText: string
+): string[] {
+  const texts = [description, scriptText, thumbnailText].map((t) => t.toLowerCase());
+  const inAll = (w: string) => texts.every((t) => t.includes(w));
+  const freq = (w: string) =>
+    texts.reduce((n, t) => n + t.split(w).length - 1, 0);
+  const pool = new Set<string>([
+    ...contentWords(topic),
+    ...contentWords(description),
+    ...contentWords(scriptText),
+    ...contentWords(thumbnailText),
+  ]);
+  const topicSet = new Set(contentWords(topic));
+  return [...pool].filter(inAll).sort((a, b) => {
+    const ta = topicSet.has(a) ? 1 : 0;
+    const tb = topicSet.has(b) ? 1 : 0;
+    if (ta !== tb) return tb - ta;
+    return freq(b) - freq(a);
+  });
+}
+
+function maxMatchTemplates(
+  topic: string,
+  shared: string[],
+  variant: 0 | 1 | 2
+): string[] {
+  const T = titleCase(topic);
+  const w = (i: number) => (shared[i] ? titleCase(shared[i]) : "");
+  const punch = shared
+    .slice(0, 2)
+    .map((s) => s.toUpperCase())
+    .join(" ");
+  const out: string[] =
+    variant === 1
+      ? [
+          `Why ${T} ${w(0)}`,
+          `How ${T} ${w(0)} ${w(1)}`,
+          `What ${T} ${w(0)} ${w(1)}`,
+          `${T}: ${w(0)} ${w(1)} ${w(2)}`,
+          `5 ${w(0)} ${w(1)} About ${T}`,
+        ]
+      : variant === 2
+        ? [
+            `${punch}: ${T}`,
+            `The ${w(0)} ${w(1)} of ${T}`,
+            `${T}: ${w(0)} ${w(1)} ${w(2)}`,
+            `${T} — ${w(0)} ${w(1)}`,
+            `${w(0)} ${w(1)}: ${T}`,
+          ]
+        : [
+            `${T}: ${w(0)} ${w(1)}`,
+            `${T} — ${w(0)} ${w(1)} ${w(2)}`,
+            `${T}: The ${w(0)} ${w(1)}`,
+            `${T}: ${w(0)} ${w(1)} ${w(2)} ${w(3)}`,
+            `${T} — ${w(0)} ${w(1)}`,
+          ];
+  return out
+    .map((s) => s.replace(/\s+/g, " ").trim())
+    .filter((s) => s.length >= 15 && s.length <= 100);
+}
+
+/** Exactly 3 titles (when the pool allows), ranked by title match,
+ *  highest first, then by title quality. Every candidate is scored with
+ *  the real consistency scorer — nothing is inflated. */
+export function buildMaxMatchTitles(input: {
+  topic: string;
+  channelTitle: string | null;
+  description: string;
+  scriptText: string;
+  thumbnailText: string;
+  currentTitle: string;
+  extraTitles?: string[];
+  variant?: 0 | 1 | 2;
+}): SuggestedTitle[] {
+  const variant = input.variant === 1 || input.variant === 2 ? input.variant : 0;
+  const shared = sharedWords(
+    input.topic,
+    input.description,
+    input.scriptText,
+    input.thumbnailText
+  );
+  const drafts = [
+    ...maxMatchTemplates(input.topic, shared, variant),
+    ...(input.extraTitles ?? []),
+    ...(variant === 0
+      ? []
+      : buildAlternateTitles(input.topic, input.channelTitle, variant).map(
+          (t) => t.title
+        )),
+  ];
+  const seen = new Set<string>();
+  const scored: SuggestedTitle[] = [];
+  for (const raw of drafts) {
+    const title = raw.trim().replace(/\s+/g, " ");
+    if (!title || title.length < 15 || title.length > 100) continue;
+    const key = title.toLowerCase();
+    if (seen.has(key) || key === input.currentTitle.toLowerCase()) continue;
+    seen.add(key);
+    const c = scoreConsistency({
+      title,
+      description: input.description,
+      scriptText: input.scriptText,
+      thumbnailText: input.thumbnailText,
+    });
+    const match = Math.round(
+      (c.parts[0].score + c.parts[1].score + c.parts[2].score) / 3
+    );
+    const ts = scoreTitle(title, input.topic);
+    scored.push({
+      title,
+      score: match,
+      consistencyScore: c.score,
+      titleScore: ts.score,
+      why: `Description ${c.parts[0].score}% · Script ${c.parts[1].score}% · Thumbnail ${c.parts[2].score}% · Title score ${ts.score}/100`,
+    });
+  }
+  scored.sort((a, b) => b.score - a.score || b.titleScore - a.titleScore);
+  return scored.slice(0, 3);
+}
+
+/** Consistency + 3 max-match titles for a video that has no saved pack
+ *  (external video, or an own video without a pack yet). The caller
+ *  supplies the texts that exist — an empty script is scored honestly
+ *  as 0 on the script part, never faked. */
+export function suggestTitlesForTexts(input: {
+  topic: string;
+  channelTitle: string | null;
+  description: string;
+  scriptText: string;
+  thumbnailText: string;
+  currentTitle: string;
+  variant?: 0 | 1 | 2;
+}): { consistency: ConsistencyResult; alternatives: SuggestedTitle[] } {
+  return {
+    consistency: scoreConsistency({
+      title: input.currentTitle,
+      description: input.description,
+      scriptText: input.scriptText,
+      thumbnailText: input.thumbnailText,
+    }),
+    alternatives: buildMaxMatchTitles(input),
+  };
 }
 
 const STOPWORDS = new Set([

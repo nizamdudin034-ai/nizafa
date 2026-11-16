@@ -3,14 +3,15 @@
 // /generate — the full video pack, vidIQ-style flow, Nizafa's own engine.
 // Start screen (topic in, Generate, "surprise me") → one scrolling pack:
 // Customize, Title (real rule-based score), Thumbnail, Hook, Outline
-// (timed beats), Script (full draft), Voiceover (ElevenLabs MP3 from the
-// script + free browser preview; no Boost lock anywhere), Tags (real
+// (timed beats), Script (full draft), Narration (script ready to narrate
+// + copy for your voice tool), Tags (real
 // scored tags), Description.
 // Every section has Regenerate (✦) and Copy (⧉). Edits are saved back
 // to the saved pack with PATCH; per-section Regenerate never writes a
 // new pack row (save:false). Scores are labelled editorial estimates.
 import { useEffect, useMemo, useState } from "react";
 import CopyButton from "@/components/CopyButton";
+import ThumbnailConceptPreview from "@/components/ThumbnailConceptPreview";
 import { EmptyState, SectionTitle } from "@/components/ui";
 import type { SeoPack, VideoLength } from "@/lib/generator";
 import { wordCount, readMinutes } from "@/lib/generator";
@@ -80,19 +81,6 @@ export default function GeneratePage() {
   const [surpriseLoading, setSurpriseLoading] = useState(false);
   const [surpriseNote, setSurpriseNote] = useState<string | null>(null);
 
-  // Voiceover (ElevenLabs MP3 + free browser preview).
-  const [voLang, setVoLang] = useState<"en" | "ur">("en");
-  const [voVoices, setVoVoices] = useState<Array<{ id: string; name: string; note: string }>>([]);
-  const [voVoiceId, setVoVoiceId] = useState("");
-  const [voConfigured, setVoConfigured] = useState<boolean | null>(null);
-  const [voUsage, setVoUsage] = useState<{ count: number; chars: number } | null>(null);
-  const [voLimits, setVoLimits] = useState<{ perDay: number; charsPerDay: number } | null>(null);
-  const [voBusy, setVoBusy] = useState(false);
-  const [voError, setVoError] = useState<string | null>(null);
-  const [voAudioUrl, setVoAudioUrl] = useState<string | null>(null);
-  const [voChunks, setVoChunks] = useState(0);
-  const [previewPlaying, setPreviewPlaying] = useState(false);
-
   async function loadRecent() {
     try {
       const res = await fetch("/api/generate");
@@ -103,126 +91,13 @@ export default function GeneratePage() {
     }
   }
 
-  async function loadVoiceover() {
-    try {
-      const res = await fetch("/api/voiceover");
-      const data = (await res.json()) as {
-        configured?: boolean;
-        voices?: Array<{ id: string; name: string; note: string }>;
-        limits?: { perDay: number; charsPerDay: number };
-        usage?: { count: number; chars: number };
-      };
-      setVoConfigured(Boolean(data.configured));
-      const list = data.voices ?? [];
-      setVoVoices(list);
-      if (list.length > 0) setVoVoiceId((prev) => prev || list[0].id);
-      if (data.limits) setVoLimits(data.limits);
-      if (data.usage) setVoUsage(data.usage);
-    } catch {
-      setVoConfigured(false);
-      setVoVoices([]);
-    }
-  }
-
-  /** ElevenLabs MP3 of the current script draft (real script text only). */
-  async function generateVoiceover() {
-    if (!pack || voBusy) return;
-    if (!scriptText.trim()) {
-      setVoError("Generate a script first.");
-      return;
-    }
-    if (!voVoiceId) {
-      setVoError("Pick a voice first.");
-      return;
-    }
-    setVoBusy(true);
-    setVoError(null);
-    try {
-      const res = await fetch("/api/voiceover", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ text: scriptText, voiceId: voVoiceId, language: voLang }),
-      });
-      const contentType = res.headers.get("content-type") ?? "";
-      if (res.ok && contentType.includes("audio/")) {
-        const blob = await res.blob();
-        if (voAudioUrl) URL.revokeObjectURL(voAudioUrl);
-        setVoAudioUrl(URL.createObjectURL(blob));
-        setVoChunks(Number(res.headers.get("x-voiceover-chunks") ?? "1"));
-        const used = res.headers.get("x-voiceover-used-today");
-        const chars = res.headers.get("x-voiceover-chars-today");
-        if (used !== null && chars !== null) {
-          setVoUsage({ count: Number(used), chars: Number(chars) });
-        }
-        return;
-      }
-      const data = (await res.json().catch(() => ({}))) as {
-        error?: string;
-        reason?: string;
-      };
-      throw new Error(data.reason ?? data.error ?? "Could not generate the voiceover.");
-    } catch (err) {
-      setVoError(err instanceof Error ? err.message : "Could not generate the voiceover.");
-    } finally {
-      setVoBusy(false);
-    }
-  }
-
-  /** Free browser preview — device voices only, plays aloud, no MP3. */
-  function stopPreview() {
-    if (typeof window !== "undefined" && "speechSynthesis" in window) {
-      window.speechSynthesis.cancel();
-    }
-    setPreviewPlaying(false);
-  }
-
-  function previewVoiceover() {
-    if (previewPlaying) {
-      stopPreview();
-      return;
-    }
-    if (!scriptText.trim()) {
-      setVoError("Generate a script first, then preview it.");
-      return;
-    }
-    if (typeof window === "undefined" || !("speechSynthesis" in window)) {
-      setVoError("This browser has no built-in voices — try Chrome or Edge.");
-      return;
-    }
-    setVoError(null);
-    const synth = window.speechSynthesis;
-    synth.cancel();
-    const utter = new SpeechSynthesisUtterance(scriptText);
-    utter.lang = voLang === "ur" ? "ur-PK" : "en-US";
-    const match = synth
-      .getVoices()
-      .find((v) => v.lang?.toLowerCase().startsWith(voLang === "ur" ? "ur" : "en"));
-    if (match) utter.voice = match;
-    utter.onend = () => setPreviewPlaying(false);
-    utter.onerror = () => setPreviewPlaying(false);
-    synth.speak(utter);
-    setPreviewPlaying(true);
-  }
-
   useEffect(() => {
     loadRecent();
-    loadVoiceover();
     // Deep links: Optimize ("Generate scores"), Create (Preview a topic).
     const t = new URLSearchParams(window.location.search).get("topic");
     if (t) setTopic(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
-
-  // Revoke the audio blob + stop any preview when it changes / on unmount.
-  useEffect(() => {
-    return () => {
-      if (voAudioUrl) URL.revokeObjectURL(voAudioUrl);
-      if (typeof window !== "undefined" && "speechSynthesis" in window) {
-        window.speechSynthesis.cancel();
-      }
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [voAudioUrl]);
 
   const currentTitle = useMemo(
     () => (pack ? pack.titles[titleIdx] ?? pack.titles[0] : null),
@@ -270,12 +145,6 @@ export default function GeneratePage() {
     setTagScores([]);
     setRecommended([]);
     setTrendingAvailable(null);
-    // New pack → new voiceover (old audio belongs to the old script).
-    setVoError(null);
-    setVoChunks(0);
-    if (voAudioUrl) URL.revokeObjectURL(voAudioUrl);
-    setVoAudioUrl(null);
-    stopPreview();
   }
 
   async function fetchTagScores(
@@ -831,7 +700,10 @@ export default function GeneratePage() {
               <CopyButton text={thumbPrompt} label="Copy prompt" />
             </div>
           </div>
-          <div className="gen-thumb-big">{currentConcept.bigText}</div>
+          <ThumbnailConceptPreview
+            bigText={currentConcept.bigText}
+            topic={pack.topic}
+          />
           <p className="small muted" style={{ margin: "8px 0 0" }}>{currentConcept.layout}</p>
           <p style={{ margin: "8px 0 0" }}>{currentConcept.imageIdea}</p>
           {thumbScore ? (
@@ -842,10 +714,15 @@ export default function GeneratePage() {
           ) : null}
           <p className="small muted" style={{ margin: "8px 0 0" }}>
             The face in the thumbnail is always the person this video is about — never the
-            channel owner&apos;s face. Generate the image in Thumbnail Studio: the text is added
-            afterwards with real fonts, never baked into the image.
+            channel owner&apos;s face. The prompt above includes the exact on-image text for
+            FLUX, so the generated image already carries the text. You can still adjust it
+            in Thumbnail Studio.
           </p>
-          <a className="btn btn-ghost btn-sm" href="/thumbnails" style={{ marginTop: 10 }}>
+          <a
+            className="btn btn-ghost btn-sm"
+            href={`/thumbnails?${new URLSearchParams({ topText: currentConcept.bigText, topic: pack.topic }).toString()}`}
+            style={{ marginTop: 10 }}
+          >
             Open in Thumbnail Studio →
           </a>
         </div>
@@ -985,107 +862,19 @@ export default function GeneratePage() {
         </p>
       </div>
 
-      {/* Voiceover — ElevenLabs MP3 from the script + free browser preview */}
+      {/* Narration — script ready to narrate, copy it for your voice tool */}
       <div className="card gen-section">
         <div className="section-head">
-          <h3 style={{ margin: 0 }}>Voiceover</h3>
+          <h3 style={{ margin: 0 }}>Narration</h3>
           <CopyButton text={scriptText} label="Copy script" />
         </div>
         <p style={{ marginTop: 0 }}>
           Your script is ready to narrate — {scriptWords} words, about {scriptMins} min at natural
           pace.
         </p>
-        <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 12 }}>
-          <select
-            className="input"
-            style={{ maxWidth: 180 }}
-            value={voLang}
-            onChange={(e) => {
-              setVoLang(e.target.value as "en" | "ur");
-              setVoError(null);
-            }}
-            aria-label="Voiceover language"
-          >
-            <option value="en">English</option>
-            <option value="ur">اردو (Urdu)</option>
-          </select>
-          <select
-            className="input"
-            style={{ flex: 1, minWidth: 200 }}
-            value={voVoiceId}
-            onChange={(e) => setVoVoiceId(e.target.value)}
-            aria-label="Voice"
-          >
-            {voVoices.length === 0 ? <option value="">Loading voices…</option> : null}
-            {voVoices.map((v) => (
-              <option key={v.id} value={v.id}>
-                {v.name}
-                {v.note ? ` — ${v.note}` : ""}
-              </option>
-            ))}
-          </select>
-        </div>
-        <div style={{ display: "flex", gap: 8, marginTop: 12, flexWrap: "wrap" }}>
-          <button
-            type="button"
-            className="btn btn-primary"
-            disabled={voBusy || !voConfigured || !scriptText.trim()}
-            onClick={() => void generateVoiceover()}
-          >
-            {voBusy ? "Generating…" : "Generate voiceover"}
-          </button>
-          <button type="button" className="btn btn-ghost" onClick={previewVoiceover}>
-            {previewPlaying ? "⏹ Stop preview" : "🔊 Browser preview"}
-          </button>
-        </div>
-        {voConfigured === false ? (
-          <p className="notice" style={{ marginTop: 12 }}>
-            Voiceover needs an ElevenLabs API key — the owner adds it in{" "}
-            <a href="/settings">Settings</a> (or sets ELEVENLABS_API_KEY in Netlify). Meanwhile,
-            the free browser preview reads the script aloud with your device&apos;s voices.
-          </p>
-        ) : null}
-        {voUsage && voLimits ? (
-          <p className="small muted" style={{ margin: "10px 0 0" }}>
-            Free — {voLimits.perDay} voiceovers a day (
-            {voLimits.charsPerDay.toLocaleString()} characters). Used today: {voUsage.count}/
-            {voLimits.perDay} · {voUsage.chars.toLocaleString()} chars.
-          </p>
-        ) : null}
-        {voError ? (
-          <p className="error" style={{ marginTop: 10 }}>
-            {voError}
-          </p>
-        ) : null}
-        {voAudioUrl ? (
-          <div style={{ marginTop: 14 }}>
-            <audio controls src={voAudioUrl} style={{ width: "100%" }} />
-            <div style={{ display: "flex", gap: 8, marginTop: 10, flexWrap: "wrap" }}>
-              <a
-                className="btn btn-ghost btn-sm"
-                href={voAudioUrl}
-                download={`${(pack?.topic ?? "voiceover").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "") || "voiceover"}-voiceover.mp3`}
-              >
-                ⬇ Download MP3
-              </a>
-              <span className="small muted" style={{ alignSelf: "center" }}>
-                {voChunks > 1 ? `${voChunks} chunks stitched · ` : ""}Voiceover of the script
-                above — change the voice and generate again for another take.
-              </span>
-            </div>
-          </div>
-        ) : null}
-        {voLang === "ur" ? (
-          <p className="small muted" style={{ margin: "8px 0 0" }}>
-            Urdu uses ElevenLabs&apos; multilingual voices. The KikiVoice &ldquo;Julian&rdquo;
-            voice from the tutorial can&apos;t be used inside Nizafa — KikiVoice has no public
-            API.
-          </p>
-        ) : null}
-        <p className="small muted" style={{ margin: "8px 0 0" }}>
-          Browser preview uses your device&apos;s built-in voices — quality varies, and it
-          can&apos;t be downloaded. The MP3 above is the real narration of the script text,
-          nothing added.
+        <p className="small muted" style={{ marginBottom: 0 }}>
+          Nizafa does not generate audio. Copy the script above and narrate it in your own voice
+          or in the voice tool you already use, then add it to your video in your editor.
         </p>
       </div>
 

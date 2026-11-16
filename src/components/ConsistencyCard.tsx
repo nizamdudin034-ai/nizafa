@@ -10,7 +10,10 @@ import type { ConsistencyResult } from "@/lib/consistency";
 
 export type AlternativeTitle = {
   title: string;
+  /** Title match 0–100: mean of title↔description, title↔script and title↔thumbnail. */
   score: number;
+  /** Overall consistency score (incl. description↔script) for context. */
+  consistencyScore: number;
   titleScore: number;
   why: string;
 };
@@ -39,6 +42,16 @@ export default function ConsistencyCard({
   const [variant, setVariant] = useState(0);
   const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [copied, setCopied] = useState<string | null>(null);
+
+  async function copyText(text: string) {
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopied(text);
+    } catch {
+      setError("Copy failed — select the title and copy it manually.");
+    }
+  }
 
   async function call(body: Record<string, unknown>) {
     setBusy(true);
@@ -82,6 +95,12 @@ export default function ConsistencyCard({
   }
 
   const c = data.consistency;
+  // Title match = mean of the three title parts. >95% means (nearly)
+  // every word of the title also appears in the description, the script
+  // and the thumbnail text — scores are never inflated to reach it.
+  const reached95 = data.alternatives.filter((a) => a.score > 95).length;
+  const titleParts = c.parts.filter((p) => p.key.startsWith("title-"));
+  const weakestTitlePart = [...titleParts].sort((a, b) => a.score - b.score)[0];
 
   return (
     <div className="card">
@@ -123,8 +142,29 @@ export default function ConsistencyCard({
       ))}
 
       <div className="drawer-section" style={{ margin: "16px 0 8px" }}>
-        Suggested titles
+        Suggested titles — ranked by match, highest first
       </div>
+      <p className="small muted" style={{ marginTop: 0 }}>
+        Match = share of the title&apos;s words that also appear in the
+        description, script and thumbnail. Titles leave off the channel
+        suffix (“ | Channel name”) — those words aren&apos;t in the script
+        or thumbnail text, so adding it would drop the match below 95%.
+        Add it back when you copy the title into YouTube Studio if you
+        want it.
+      </p>
+      {reached95 > 0 ? (
+        <p className="small" style={{ color: "var(--teal-600)", marginTop: 0 }}>
+          ✓ {reached95} of these reach 95%+ match with the description,
+          script and thumbnail.
+        </p>
+      ) : (
+        <p className="small muted" style={{ marginTop: 0 }}>
+          None of these titles reaches 95% match yet
+          {weakestTitlePart
+            ? ` — weakest part is ${weakestTitlePart.label} (${weakestTitlePart.score}/100). Add the missing words to the description, script or thumbnail text to lift it.`
+            : "."}
+        </p>
+      )}
       {data.alternatives.length === 0 ? (
         <p className="muted small">
           No better-matching title in this pack. Press Regenerate for fresh
@@ -132,24 +172,55 @@ export default function ConsistencyCard({
         </p>
       ) : (
         data.alternatives.map((a) => (
-          <button
-            key={a.title}
-            type="button"
-            className="suggest-row"
-            onClick={() => apply(a.title)}
-            disabled={busy}
-            title="Click to apply this title to your pack"
-          >
-            <span className={badgeClass(a.score)}>{a.score}</span>
-            <span style={{ minWidth: 0, textAlign: "start" }}>
-              <span style={{ display: "block", fontWeight: 600 }}>{a.title}</span>
-              <span className="small muted" style={{ display: "block" }}>
-                Match {a.score}/100 · Title score {a.titleScore}/100 — click to apply
+          <div key={a.title} className="suggest-row" style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            <button
+              type="button"
+              style={{ flex: 1, minWidth: 0, textAlign: "start", background: "none", border: "none", padding: 0, cursor: "pointer", color: "inherit", font: "inherit" }}
+              onClick={() => apply(a.title)}
+              disabled={busy}
+              title="Click to apply this title to your pack"
+            >
+              <span style={{ display: "flex", gap: 8, alignItems: "flex-start" }}>
+                <span className={badgeClass(a.score)}>{a.score}</span>
+                <span style={{ minWidth: 0 }}>
+                  <span style={{ display: "block", fontWeight: 600 }}>{a.title}</span>
+                  <span className="small muted" style={{ display: "block" }}>
+                    Match {a.score}/100 · Title score {a.titleScore}/100 — {a.why}
+                  </span>
+                </span>
               </span>
-            </span>
-          </button>
+            </button>
+            <button
+              type="button"
+              className="btn btn-ghost btn-sm"
+              onClick={() => copyText(a.title)}
+              disabled={busy}
+              title="Copy this title for YouTube Studio"
+            >
+              {copied === a.title ? "Copied ✓" : "Copy"}
+            </button>
+          </div>
         ))
       )}
+      <p className="small muted" style={{ marginTop: 10, marginBottom: 0 }}>
+        Applying changes the title in your Nizafa pack only — it does NOT
+        change the title on YouTube. Copy the new title into YouTube Studio
+        to change it there.
+      </p>
+      {message ? (
+        <div style={{ marginTop: 12 }}>
+          <p className="small" style={{ color: "var(--teal-600)", marginTop: 0, marginBottom: 6 }}>{message}</p>
+          <p style={{ margin: 0, fontWeight: 600 }}>{data.currentTitle}</p>
+          <button
+            type="button"
+            className="btn btn-ghost btn-sm"
+            style={{ marginTop: 6 }}
+            onClick={() => copyText(data.currentTitle)}
+          >
+            {copied === data.currentTitle ? "Copied ✓ — paste it into YouTube Studio" : "Copy title for YouTube Studio"}
+          </button>
+        </div>
+      ) : null}
 
       <div style={{ display: "flex", gap: 8, marginTop: 14, flexWrap: "wrap" }}>
         <button
@@ -165,7 +236,6 @@ export default function ConsistencyCard({
           predictions of views.
         </span>
       </div>
-      {message ? <p className="small" style={{ color: "var(--teal-600)", marginTop: 10, marginBottom: 0 }}>{message}</p> : null}
       {error ? <p className="error small" style={{ marginTop: 10, marginBottom: 0 }}>{error}</p> : null}
     </div>
   );

@@ -5,10 +5,12 @@
 // such; where data does not exist the UI says so instead of a fake zero.
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
-import ConsistencyCard, { type ConsistencyInitial } from "@/components/ConsistencyCard";
+import ConsistencyCard, { type ConsistencyInitial, type AlternativeTitle } from "@/components/ConsistencyCard";
 import { thumbUrl, timeAgo, fmtViews } from "@/lib/seo-checklist";
+import { renderCompositedThumbnail, type ThumbnailTextSpec } from "@/lib/thumbnail-text";
+import type { ConsistencyResult } from "@/lib/consistency";
 import {
   recommendTags,
   scoreSeoChecklist,
@@ -60,6 +62,18 @@ export type AnalysisData = {
   packId: number | null;
   packTopic: string | null;
   consistencyInitial: ConsistencyInitial | null;
+  /** Standalone (no-pack) consistency + 3 suggested titles, ranked by title match. */
+  standalone: {
+    currentTitle: string;
+    consistency: ConsistencyResult;
+    alternatives: AlternativeTitle[];
+  } | null;
+  /** "pack" = concepts from the saved pack; "generated" = built from the topic. */
+  thumbSource: "pack" | "generated";
+  /** External (non-own) video: Apply saves to a new pack instead of the matched pack. */
+  external: boolean;
+  /** Back link target; defaults to /optimize. */
+  backHref: string | null;
   thumbScore: VideoThumbnailScore | null;
   thumbConcepts: ThumbConceptView[];
   topicKeywords: string[];
@@ -78,6 +92,68 @@ function scoreColor(score: number): string {
   return "#b91c1c";
 }
 
+/** Punch word(s) of a concept's big text — first ALL-CAPS / $ / number words. */
+function punchWordOf(bigText: string): string {
+  return (
+    bigText
+      .split(/\s+/)
+      .filter((w) => /[A-Z]{2,}/.test(w) || /\$|\d/.test(w))
+      .slice(0, 2)
+      .join(" ") || bigText.split(/\s+/)[0] || ""
+  );
+}
+
+/**
+ * Concept preview — the concept's text composited ON the video's thumbnail
+ * via the shared helper (src/lib/thumbnail-text.ts): the video thumbnail
+ * as the base image, the concept text in huge bold distressed white across
+ * the top, the punch word in a solid red box underneath. A bare image with
+ * no text is not a thumbnail concept — the text is the concept. If the
+ * thumbnail fails to load, the helper falls back to a dark gradient, and
+ * the text is still drawn.
+ */
+function ConceptThumb({
+  videoId,
+  bigText,
+  punch,
+}: {
+  videoId: string;
+  bigText: string;
+  punch: string;
+}) {
+  const ref = useRef<HTMLCanvasElement>(null);
+
+  useEffect(() => {
+    const canvas = ref.current;
+    if (!canvas) return;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return;
+    const W = 640;
+    const H = 360;
+    const spec: ThumbnailTextSpec = { topText: bigText, punchWord: punch };
+    const paint = (base: HTMLImageElement | null) => {
+      const composed = renderCompositedThumbnail(base, spec, W, H);
+      ctx.clearRect(0, 0, W, H);
+      ctx.drawImage(composed, 0, 0);
+    };
+    const img = new Image();
+    img.crossOrigin = "anonymous";
+    img.onload = () => paint(img);
+    img.onerror = () => paint(null);
+    img.src = thumbUrl(videoId, "hq");
+  }, [videoId, bigText, punch]);
+
+  return (
+    <canvas
+      ref={ref}
+      width={640}
+      height={360}
+      style={{ width: "100%", height: "auto", display: "block", borderRadius: 8 }}
+      aria-label={`Thumbnail concept: ${bigText}`}
+    />
+  );
+}
+
 export default function AnalysisTabs({ data }: { data: AnalysisData }) {
   const [tab, setTab] = useState<Tab>("title");
   const [tags, setTags] = useState<string[]>(data.initialTags);
@@ -88,6 +164,18 @@ export default function AnalysisTabs({ data }: { data: AnalysisData }) {
   const [showFullDesc, setShowFullDesc] = useState(false);
   const [device, setDevice] = useState<"mobile" | "desktop">("mobile");
   const [conceptIdx, setConceptIdx] = useState(0);
+  // Concepts ranked by concept score, highest first.
+  const rankedConcepts = useMemo(
+    () => [...data.thumbConcepts].sort((a, b) => b.score - a.score),
+    [data.thumbConcepts]
+  );
+  const [extCurrentTitle, setExtCurrentTitle] = useState(
+    data.standalone?.currentTitle ?? ""
+  );
+  const [extBusy, setExtBusy] = useState(false);
+  const [extMsg, setExtMsg] = useState<string | null>(null);
+  const [extErr, setExtErr] = useState<string | null>(null);
+  const [copied, setCopied] = useState<string | null>(null);
 
   const checklist = useMemo(
     () =>
@@ -150,12 +238,68 @@ export default function AnalysisTabs({ data }: { data: AnalysisData }) {
     }
   }
 
+  async function copyText(text: string) {
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopied(text);
+    } catch {
+      setTagErr("Copy failed — select the text and copy it manually.");
+    }
+  }
+
+  /** Apply a suggested title for a video with no saved pack: save a new
+   *  pack for the topic, then set the title as its chosen title. This
+   *  changes Nizafa's pack only — never the video on YouTube. */
+  async function applyExternalTitle(title: string) {
+    setExtBusy(true);
+    setExtErr(null);
+    setExtMsg(null);
+    try {
+      const res = await fetch("/api/generate", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ topic: data.generateTopic, save: true }),
+      });
+      const d = (await res.json()) as { packageId?: number; error?: string };
+      if (!res.ok || !d.packageId) {
+        throw new Error(d.error ?? "Could not save a pack.");
+      }
+      const res2 = await fetch("/api/generate", {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          id: d.packageId,
+          patch: {
+            bestTitle: title,
+            chosenTitle: title,
+            chosenAt: new Date().toISOString(),
+          },
+        }),
+      });
+      const d2 = (await res2.json()) as { error?: string };
+      if (!res2.ok) throw new Error(d2.error ?? "Could not apply the title.");
+      setExtCurrentTitle(title);
+      setExtMsg(`Saved to a new Nizafa pack as “${title}”.`);
+    } catch (e) {
+      setExtErr(e instanceof Error ? e.message : "Could not apply the title.");
+    } finally {
+      setExtBusy(false);
+    }
+  }
+
   const v = data.video;
   const descShort =
     data.description.length > 320 && !showFullDesc
       ? `${data.description.slice(0, 320)}…`
       : data.description;
-  const concept = data.thumbConcepts[conceptIdx] ?? null;
+  const concept = rankedConcepts[conceptIdx] ?? null;
+  // Standalone (no-pack) >95% bookkeeping, same rule as the pack card.
+  const sa = data.standalone;
+  const saReached95 = sa ? sa.alternatives.filter((a) => a.score > 95).length : 0;
+  const saTitleParts = sa
+    ? sa.consistency.parts.filter((p) => p.key.startsWith("title-"))
+    : [];
+  const saWeakest = [...saTitleParts].sort((a, b) => a.score - b.score)[0];
 
   const tabs: Array<{ key: Tab; label: string }> = [
     { key: "title", label: "Title" },
@@ -167,7 +311,7 @@ export default function AnalysisTabs({ data }: { data: AnalysisData }) {
   return (
     <div>
       <div className="analysis-head">
-        <Link href="/optimize" className="analysis-back" aria-label="Back to Optimize">
+        <Link href={data.backHref ?? "/optimize"} className="analysis-back" aria-label="Back">
           ←
         </Link>
         <h1>Analysis</h1>
@@ -209,6 +353,14 @@ export default function AnalysisTabs({ data }: { data: AnalysisData }) {
               <div className="small muted">
                 {timeAgo(v.publishedAt)} • {fmtViews(v.viewCount)} Views
               </div>
+              <a
+                href={v.url}
+                target="_blank"
+                rel="noreferrer"
+                className="small muted"
+              >
+                Watch on YouTube ↗
+              </a>
             </div>
           </div>
 
@@ -225,6 +377,150 @@ export default function AnalysisTabs({ data }: { data: AnalysisData }) {
                 <ConsistencyCard initial={data.consistencyInitial} />
               </div>
             </>
+          ) : sa ? (
+            <div className="card" style={{ marginTop: 16 }}>
+              <div className="section-head">
+                <div>
+                  <h2 style={{ marginBottom: 2 }}>Title match &amp; consistency</h2>
+                  <div className="small muted">
+                    One score for title + description + script + thumbnail —
+                    from this video&apos;s live description and generated
+                    thumbnail concepts. No script is saved for this video, so
+                    the script part scores 0.
+                  </div>
+                </div>
+                <span
+                  className="score-badge"
+                  style={{
+                    background: "var(--surface-2)",
+                    color: scoreColor(sa.consistency.score),
+                  }}
+                >
+                  {sa.consistency.score}
+                </span>
+              </div>
+
+              <div style={{ marginBottom: 12 }}>
+                <div className="small" style={{ fontWeight: 700 }}>Current title</div>
+                <div>{extCurrentTitle || sa.currentTitle}</div>
+              </div>
+
+              <div style={{ display: "grid", gap: 10, marginBottom: 12 }}>
+                {sa.consistency.parts.map((p) => (
+                  <div key={p.key}>
+                    <div style={{ display: "flex", justifyContent: "space-between", gap: 8 }}>
+                      <span className="small" style={{ fontWeight: 600 }}>{p.label}</span>
+                      <strong className="small">{p.score}/100</strong>
+                    </div>
+                    <div className="meter" style={{ marginTop: 4 }}>
+                      <span style={{ width: `${p.score}%` }} />
+                    </div>
+                    <div className="small muted">{p.detail}</div>
+                  </div>
+                ))}
+              </div>
+
+              {sa.consistency.notes.map((n) => (
+                <p key={n} className="small muted" style={{ marginBottom: 6 }}>
+                  {n}
+                </p>
+              ))}
+
+              <div className="drawer-section" style={{ margin: "16px 0 8px" }}>
+                Suggested titles — ranked by match, highest first
+              </div>
+              <p className="small muted" style={{ marginTop: 0 }}>
+                Match = share of the title&apos;s words that also appear in
+                the description, script and thumbnail. Titles leave off the
+                channel suffix — those words aren&apos;t in the script or
+                thumbnail text, so adding it would drop the match below 95%.
+              </p>
+              {saReached95 > 0 ? (
+                <p className="small" style={{ color: "var(--teal-600)", marginTop: 0 }}>
+                  ✓ {saReached95} of these reach 95%+ match with the
+                  description, script and thumbnail.
+                </p>
+              ) : (
+                <p className="small muted" style={{ marginTop: 0 }}>
+                  None of these titles reaches 95% match yet
+                  {saWeakest
+                    ? ` — weakest part is ${saWeakest.label} (${saWeakest.score}/100). Add the missing words to the description, script or thumbnail text to lift it.`
+                    : "."}
+                </p>
+              )}
+              {sa.alternatives.length === 0 ? (
+                <p className="muted small">
+                  No alternative titles could be built for this video.
+                </p>
+              ) : (
+                sa.alternatives.map((a) => (
+                  <div key={a.title} className="suggest-row" style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                    <button
+                      type="button"
+                      style={{ flex: 1, minWidth: 0, textAlign: "start", background: "none", border: "none", padding: 0, cursor: "pointer", color: "inherit", font: "inherit" }}
+                      onClick={() => applyExternalTitle(a.title)}
+                      disabled={extBusy}
+                      title="Click to apply this title — saves it to a new Nizafa pack"
+                    >
+                      <span style={{ display: "flex", gap: 8, alignItems: "flex-start" }}>
+                        <span
+                          className="score-badge"
+                          style={{
+                            background: "var(--surface-2)",
+                            color: scoreColor(a.score),
+                          }}
+                        >
+                          {a.score}
+                        </span>
+                        <span style={{ minWidth: 0 }}>
+                          <span style={{ display: "block", fontWeight: 600 }}>{a.title}</span>
+                          <span className="small muted" style={{ display: "block" }}>
+                            Match {a.score}/100 · Title score {a.titleScore}/100 — {a.why}
+                          </span>
+                        </span>
+                      </span>
+                    </button>
+                    <button
+                      type="button"
+                      className="btn btn-ghost btn-sm"
+                      onClick={() => copyText(a.title)}
+                      disabled={extBusy}
+                      title="Copy this title for YouTube Studio"
+                    >
+                      {copied === a.title ? "Copied ✓" : "Copy"}
+                    </button>
+                  </div>
+                ))
+              )}
+              <p className="small muted" style={{ marginTop: 10, marginBottom: 0 }}>
+                Applying saves the title to a new Nizafa pack — it does NOT
+                change the title on YouTube. Copy the new title into YouTube
+                Studio to change it there.
+              </p>
+              {extMsg ? (
+                <div style={{ marginTop: 12 }}>
+                  <p className="small" style={{ color: "var(--teal-600)", marginTop: 0, marginBottom: 6 }}>{extMsg}</p>
+                  <p style={{ margin: 0, fontWeight: 600 }}>{extCurrentTitle}</p>
+                  <button
+                    type="button"
+                    className="btn btn-ghost btn-sm"
+                    style={{ marginTop: 6 }}
+                    onClick={() => copyText(extCurrentTitle)}
+                  >
+                    {copied === extCurrentTitle ? "Copied ✓ — paste it into YouTube Studio" : "Copy title for YouTube Studio"}
+                  </button>
+                </div>
+              ) : null}
+              {extErr ? <p className="error small" style={{ marginTop: 10, marginBottom: 0 }}>{extErr}</p> : null}
+              <p style={{ marginTop: 14, marginBottom: 0 }}>
+                <Link
+                  className="btn btn-primary"
+                  href={`/generate?topic=${encodeURIComponent(data.generateTopic)}`}
+                >
+                  Generate a pack for this video
+                </Link>
+              </p>
+            </div>
           ) : (
             <div className="card" style={{ marginTop: 16 }}>
               <div className="section-head">
@@ -309,8 +605,9 @@ export default function AnalysisTabs({ data }: { data: AnalysisData }) {
                 <div>
                   <h2 style={{ marginBottom: 2 }}>Thumbnail concept score</h2>
                   <div className="small muted">
-                    From your saved pack’s concept — an editorial checklist,
-                    not a pixel analysis of the live image.
+                    {data.thumbSource === "generated"
+                      ? "Generated from the video's topic — an editorial checklist, not a pixel analysis of the live image."
+                      : "From your saved pack's concept — an editorial checklist, not a pixel analysis of the live image."}
                   </div>
                 </div>
                 <span
@@ -366,42 +663,78 @@ export default function AnalysisTabs({ data }: { data: AnalysisData }) {
             </div>
           )}
 
-          {data.thumbConcepts.length > 1 ? (
+          {rankedConcepts.length > 1 ? (
             <div className="card" style={{ marginTop: 16 }}>
-              <h2 style={{ marginBottom: 4 }}>Concepts from your pack</h2>
+              <h2 style={{ marginBottom: 4 }}>
+                {data.thumbSource === "generated"
+                  ? "Concepts for this video"
+                  : "Concepts from your pack"}
+              </h2>
               <p className="small muted" style={{ marginTop: 0 }}>
-                Tap a concept to see its banner text and layout.
+                Ranked by concept score, highest first. Each preview shows the
+                concept&apos;s text composited on the video&apos;s thumbnail —
+                the text is the concept. Tap one to open it in Thumbnail Studio.
               </p>
-              <div style={{ display: "grid", gap: 8 }}>
-                {data.thumbConcepts.map((c, i) => (
+              <div style={{ display: "grid", gap: 12 }}>
+                {rankedConcepts.map((c, i) => (
                   <button
                     key={c.bigText}
                     type="button"
                     className={`suggest-row ${conceptIdx === i ? "active" : ""}`}
                     onClick={() => setConceptIdx(i)}
+                    style={{ display: "block", padding: 10, textAlign: "start" }}
                   >
+                    <ConceptThumb
+                      videoId={data.video.videoId}
+                      bigText={c.bigText}
+                      punch={punchWordOf(c.bigText)}
+                    />
                     <span
-                      className="score-badge"
                       style={{
-                        background: "var(--surface-2)",
-                        color: scoreColor(c.score),
+                        display: "flex",
+                        gap: 8,
+                        alignItems: "flex-start",
+                        marginTop: 8,
                       }}
                     >
-                      {c.score}
-                    </span>
-                    <span style={{ minWidth: 0, textAlign: "start" }}>
-                      <span style={{ display: "block", fontWeight: 700 }}>{c.bigText}</span>
-                      <span className="small muted" style={{ display: "block" }}>
-                        {c.imageIdea}
+                      <span
+                        className="score-badge"
+                        style={{
+                          background: "var(--surface-2)",
+                          color: scoreColor(c.score),
+                          flexShrink: 0,
+                        }}
+                      >
+                        {c.score}
+                      </span>
+                      <span style={{ minWidth: 0 }}>
+                        <span style={{ display: "block", fontWeight: 700 }}>{c.bigText}</span>
+                        <span className="small muted" style={{ display: "block" }}>
+                          {c.imageIdea}
+                        </span>
                       </span>
                     </span>
                   </button>
                 ))}
               </div>
               {concept ? (
-                <p className="small muted" style={{ marginTop: 12, marginBottom: 0 }}>
-                  Layout: {concept.layout}
-                </p>
+                <>
+                  <p className="small muted" style={{ marginTop: 12, marginBottom: 6 }}>
+                    Layout: {concept.layout}
+                  </p>
+                  <p style={{ marginTop: 0, marginBottom: 0 }}>
+                    <Link
+                      className="btn btn-ghost btn-sm"
+                      href={`/thumbnails?topText=${encodeURIComponent(concept.bigText)}&punch=${encodeURIComponent(punchWordOf(concept.bigText))}&topic=${encodeURIComponent(data.generateTopic)}&notes=${encodeURIComponent(concept.layout)}`}
+                    >
+                      Open this concept in Thumbnail Studio →
+                    </Link>
+                  </p>
+                  <p className="small muted" style={{ marginTop: 8, marginBottom: 0 }}>
+                    Opens in Thumbnail Studio — build the image there. It does
+                    not change the live YouTube thumbnail.
+                  </p>
+                </>
               ) : null}
             </div>
           ) : null}
@@ -654,10 +987,13 @@ export default function AnalysisTabs({ data }: { data: AnalysisData }) {
                   key={`${e.videoId}-${e.isOwn ? "own" : "comp"}`}
                   className={`opt-feed-entry ${e.isOwn ? "own" : ""}`}
                 >
-                  <a
-                    href={`https://www.youtube.com/watch?v=${e.videoId}`}
-                    target="_blank"
-                    rel="noreferrer"
+                  <Link
+                    href={
+                      e.isOwn
+                        ? `/optimize/${e.videoId}`
+                        : `/analyze?videoId=${e.videoId}`
+                    }
+                    aria-label={e.title}
                   >
                     {/* eslint-disable-next-line @next/next/no-img-element */}
                     <img
@@ -669,7 +1005,7 @@ export default function AnalysisTabs({ data }: { data: AnalysisData }) {
                     {e.duration ? (
                       <span className="opt-duration">{e.duration}</span>
                     ) : null}
-                  </a>
+                  </Link>
                   <div className="opt-feed-body">
                     {e.channelAvatar ? (
                       // eslint-disable-next-line @next/next/no-img-element
@@ -684,7 +1020,16 @@ export default function AnalysisTabs({ data }: { data: AnalysisData }) {
                     <div style={{ minWidth: 0 }}>
                       <div className="opt-feed-title">
                         {e.isOwn ? <span className="badge badge-teal">Your video</span> : null}{" "}
-                        {e.title}
+                        <Link
+                          href={
+                            e.isOwn
+                              ? `/optimize/${e.videoId}`
+                              : `/analyze?videoId=${e.videoId}`
+                          }
+                          style={{ color: "var(--ink)", fontWeight: 600 }}
+                        >
+                          {e.title}
+                        </Link>
                       </div>
                       <div className="small muted">
                         {e.channelTitle} • {fmtViews(e.viewCount)} views •{" "}

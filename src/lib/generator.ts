@@ -330,7 +330,9 @@ function punchWords(topic: string): string {
   return keywords.slice(0, 3).join(" ").toUpperCase() || topic.toUpperCase();
 }
 
-function buildThumbnailConcepts(topic: string): ThumbnailConcept[] {
+/** Three house-style thumbnail concepts for a topic (exported so the
+ *  Analysis pages can generate concepts for videos without a saved pack). */
+export function buildThumbnailConcepts(topic: string): ThumbnailConcept[] {
   const punch = punchWords(topic);
   return [
     {

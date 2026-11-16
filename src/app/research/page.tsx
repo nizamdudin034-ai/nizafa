@@ -13,10 +13,12 @@
 // - Filters (subscribers + views-per-hour ranges) and Sort are FREE —
 //   Nizafa has no Boost-style paywall here.
 import { useEffect, useMemo, useRef, useState } from "react";
+import Link from "next/link";
 import CopyButton from "@/components/CopyButton";
 import { EmptyState, SectionTitle } from "@/components/ui";
 import type { KeywordIdea } from "@/lib/generator";
 import { fmtViews, thumbUrl, timeAgo } from "@/lib/seo-checklist";
+import { analysisHref } from "@/lib/video-links";
 
 type Tab = "keywords" | "videos" | "shorts" | "channels" | "thumbnails";
 type Period = "today" | "week" | "month";
@@ -32,6 +34,7 @@ type FeedVideo = {
   vph: number;
   isShort: boolean | null;
   durationSeconds: number | null;
+  isOwn: boolean;
   channel: { id: number; title: string; avatarUrl: string | null; subs: number | null };
 };
 
@@ -505,14 +508,12 @@ export default function ResearchPage() {
                         kw.searchResults.map((v) => (
                           <div key={v.videoId} className="list-row">
                             <div style={{ flex: 1, minWidth: 0 }}>
-                              <a
-                                href={`https://www.youtube.com/watch?v=${v.videoId}`}
-                                target="_blank"
-                                rel="noreferrer"
+                              <Link
+                                href={analysisHref(v.videoId, false)}
                                 style={{ fontWeight: 700, overflowWrap: "anywhere" }}
                               >
                                 {v.title}
-                              </a>
+                              </Link>
                               <div className="small muted">{v.channelTitle}</div>
                             </div>
                           </div>
@@ -605,7 +606,7 @@ export default function ResearchPage() {
               ) : tab === "shorts" ? (
                 <div className="res-shorts-grid">
                   {feedVideos.map((v) => (
-                    <a key={v.videoId} href={v.url} target="_blank" rel="noreferrer" className="res-short-card">
+                    <Link key={v.videoId} href={analysisHref(v.videoId, v.isOwn)} className="res-short-card">
                       {/* eslint-disable-next-line @next/next/no-img-element */}
                       <img src={thumbUrl(v.videoId, "hq")} alt="" loading="lazy" className="res-short-thumb" />
                       {v.ratio >= 1.5 ? (
@@ -620,23 +621,23 @@ export default function ResearchPage() {
                           {fmtViews(v.viewCount)} views · {timeAgo(v.publishedAt)}
                         </span>
                       </span>
-                    </a>
+                    </Link>
                   ))}
                 </div>
               ) : (
                 <div className="res-video-list">
                   {feedVideos.map((v) => (
                     <article key={v.videoId} className="res-video-card">
-                      <a href={v.url} target="_blank" rel="noreferrer" className="res-video-thumb-wrap">
+                      <Link href={analysisHref(v.videoId, v.isOwn)} className="res-video-thumb-wrap">
                         {/* eslint-disable-next-line @next/next/no-img-element */}
                         <img src={thumbUrl(v.videoId, "hq")} alt="" loading="lazy" className="res-video-thumb" />
                         {v.ratio >= 1.5 ? (
                           <span className={badgeClass(v.ratio)}>{badgeLabel(v.ratio)}</span>
                         ) : null}
-                      </a>
-                      <a href={v.url} target="_blank" rel="noreferrer" className="res-video-title">
+                      </Link>
+                      <Link href={analysisHref(v.videoId, v.isOwn)} className="res-video-title">
                         {v.title}
-                      </a>
+                      </Link>
                       <p className="small muted" style={{ margin: "4px 0 0" }}>
                         {v.channel.title}
                         {v.channel.subs != null ? ` · ${fmtViews(v.channel.subs)} subscribers` : ""}

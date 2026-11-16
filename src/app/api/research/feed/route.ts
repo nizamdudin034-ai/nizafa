@@ -27,6 +27,8 @@ export type FeedVideo = {
   vph: number;
   isShort: boolean | null;
   durationSeconds: number | null;
+  /** True when the video belongs to the user's own channel. */
+  isOwn: boolean;
   channel: { id: number; title: string; avatarUrl: string | null; subs: number | null };
 };
 
@@ -222,6 +224,7 @@ export async function GET() {
         vph: vphOf(Number(v.view_count ?? 0), v.published_at),
         isShort: null,
         durationSeconds: null,
+        isOwn: ch.role === "own",
         channel: {
           id: ch.id,
           title: ch.title,

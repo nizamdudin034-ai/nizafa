@@ -5,6 +5,271 @@
 // user's own connected channel data, (b) a curated playbook written for
 // this app, and (c) a cache of earlier answers. That keeps answers fast
 // and free of invented numbers.
+//
+// Data intents (ideas / views / audit / latest-video review / script /
+// community post) are answered from live data loaded by /api/assistant —
+// see answerFromData below. They are checked BEFORE the playbook, so a
+// request for real data never gets a generic playbook answer.
+
+import { generateSeoPack } from "./generator";
+import type { AuditReport, VideoSeoCheck } from "./audit";
+import type { DailyIdea } from "./daily-ideas";
+
+export type DataIntent =
+  | "ideas"
+  | "views"
+  | "audit"
+  | "latest-review"
+  | "script"
+  | "community";
+
+/** Everything a data intent needs, loaded live by /api/assistant. */
+export type AssistantDataBundle = {
+  channel: ChannelContext | null;
+  latestVideo: {
+    videoId: string;
+    title: string;
+    views: number | null;
+    publishedAt: string | null;
+  } | null;
+  audit: AuditReport | null;
+  ideas: DailyIdea[];
+  trendingTitles: string[];
+  bestPosting: string[];
+  latestReview: {
+    title: string;
+    titleScore: number | null;
+    thumbScore: number | null;
+    consistency: number | null;
+    checks: VideoSeoCheck[];
+    fixes: string[];
+  } | null;
+};
+
+export function emptyDataBundle(): AssistantDataBundle {
+  return {
+    channel: null,
+    latestVideo: null,
+    audit: null,
+    ideas: [],
+    trendingTitles: [],
+    bestPosting: [],
+    latestReview: null,
+  };
+}
+
+const INTENT_PATTERNS: Array<{ intent: DataIntent; re: RegExp }> = [
+  { intent: "ideas", re: /video ideas?|give me ideas|ideas for|new ideas|5 video ideas|آئیڈیا|آئیڈیاز|خیالات/i },
+  { intent: "views", re: /get more views|more views|increase (my )?views|grow (my )?views|زیادہ ویوز/i },
+  { intent: "audit", re: /channel audit|audit (my|the) channel|full review|review my channel|audit my|آڈٹ/i },
+  { intent: "latest-review", re: /review my latest video|review (my )?(latest|newest) video|feedback on my (latest )?video|review my video/i },
+  { intent: "script", re: /write a script|draft a script|script (about|for|on)|اسکرپٹ لکھ/i },
+  { intent: "community", re: /community post|draft a post|write a post|کمیونٹی پوسٹ/i },
+];
+
+/** Which data intent (if any) a message asks for — checked before the playbook. */
+export function detectDataIntent(message: string): DataIntent | null {
+  for (const { intent, re } of INTENT_PATTERNS) {
+    if (re.test(message)) return intent;
+  }
+  return null;
+}
+
+function noChannel(lang: AssistantLang): string {
+  return lang === "ur"
+    ? "اس کے لیے پہلے اپنا چینل منسلک کریں — یہ جواب آپ کے اپنے چینل کے ڈیٹا سے بنتا ہے۔ ہوم پیج پر جا کر “Connect a channel” دبائیں۔"
+    : "Connect your channel first — this answer is built from your own channel data. Go to Home and press “Connect a channel”.";
+}
+
+function scriptTopic(message: string, data: AssistantDataBundle): string | null {
+  const m = message.match(/(?:about|for|on)\s+(.+?)(?:\.|\?|$)/i);
+  const fromMessage = (m?.[1] ?? "").trim();
+  if (fromMessage.length >= 3) return fromMessage.slice(0, 120);
+  if (data.trendingTitles[0]) return data.trendingTitles[0];
+  if (data.latestVideo) {
+    return data.latestVideo.title.replace(/\s*\|\s*[^|]+$/, "").trim();
+  }
+  return null;
+}
+
+/**
+ * Answer a data intent from live data. Returns null only when the
+ * message has no data intent. Every branch is honest about missing data
+ * instead of inventing numbers.
+ */
+export function answerFromData(
+  message: string,
+  lang: AssistantLang,
+  data: AssistantDataBundle
+): string | null {
+  const intent = detectDataIntent(message);
+  if (!intent) return null;
+  const ur = lang === "ur";
+
+  if (intent === "ideas") {
+    if (!data.channel) return noChannel(lang);
+    if (data.ideas.length === 0) {
+      return ur
+        ? "آج کے آئیڈیاز ابھی تیار نہیں ہو سکے — Ideas صفحہ کھول کر دوبارہ کوشش کریں۔"
+        : "Today's ideas could not be generated — open the Ideas page and try again.";
+    }
+    const lines = data.ideas.map(
+      (idea, i) =>
+        `${i + 1}. ${idea.title} (View prediction: ${idea.prediction})\n   Hook: ${idea.hook}\n   Why it fits: ${idea.whyFits}`
+    );
+    return (
+      (ur
+        ? `آپ کے چینل “${data.channel.title}” کے لیے آج کے 4 آئیڈیاز:\n\n`
+        : `Here are 4 ideas for your channel “${data.channel.title}” today:\n\n`) +
+      lines.join("\n\n")
+    );
+  }
+
+  if (intent === "views") {
+    if (!data.channel) return noChannel(lang);
+    const ch = data.channel;
+    const top = ch.topVideos[0];
+    const tips: string[] = [];
+    if (top) {
+      tips.push(
+        ur
+          ? `آپ کی سب سے زیادہ دیکھی گئی ویڈیو “${top.title}” ہے (${fmt(top.views)} ویوز) — اسی طرح کی ایک اور ویڈیو بنائیں۔`
+          : `Your most-viewed video is “${top.title}” (${fmt(top.views)} views) — make another one like it.`
+      );
+    }
+    if (data.bestPosting[0]) {
+      tips.push(
+        ur
+          ? `آپ کی اپنی تاریخ کے مطابق بہترین وقت: ${data.bestPosting[0]}۔`
+          : `Your own upload history says your best window is: ${data.bestPosting[0]}.`
+      );
+    }
+    if (data.audit) {
+      for (const fix of data.audit.fixes.slice(0, 2)) tips.push(fix);
+    }
+    const head = ur
+      ? `آپ کا چینل “${ch.title}”: ${fmt(ch.subscribers)} سبسکرائبر، ${fmt(ch.views)} کل ویوز، ${fmt(ch.videos)} ویڈیوز۔ ویوز بڑھانے کے لیے:\n\n`
+      : `Your channel “${ch.title}”: ${fmt(ch.subscribers)} subscribers, ${fmt(ch.views)} total views, ${fmt(ch.videos)} videos. To get more views:\n\n`;
+    return (
+      head +
+      tips.map((t, i) => `${i + 1}. ${t}`).join("\n")
+    );
+  }
+
+  if (intent === "audit") {
+    if (!data.audit || !data.channel) return noChannel(lang);
+    const a = data.audit;
+    const weakest = [...a.checks].sort((x, y) => x.points - y.points).slice(0, 3);
+    const head = ur
+      ? `آپ کے چینل “${data.channel.title}” کا آڈٹ: ${a.score}/100 (${a.grade})۔\n\n`
+      : `Channel audit for “${data.channel.title}”: ${a.score}/100 (${a.grade}).\n\n`;
+    const weakLines = weakest.map(
+      (c) => `• ${c.label}: ${c.points}/${c.maxPoints} — ${c.detail}`
+    );
+    const fixLines = a.fixes.slice(0, 3).map((f, i) => `${i + 1}. ${f}`);
+    return (
+      head +
+      (ur ? "سب سے کمزور نکات:\n" : "Weakest checks:\n") +
+      weakLines.join("\n") +
+      (fixLines.length > 0
+        ? `\n\n${ur ? "پہلے یہ ٹھیک کریں:" : "Fix first:"}\n${fixLines.join("\n")}`
+        : "") +
+      (ur
+        ? "\n\nمکمل تفصیل Optimize صفحے پر ہے۔"
+        : "\n\nFull detail is on the Optimize page.")
+    );
+  }
+
+  if (intent === "latest-review") {
+    if (!data.latestVideo || !data.latestReview) {
+      return ur
+        ? "آپ کی کوئی ویڈیو محفوظ نہیں ہے — پہلے چینل منسلک کریں اور ویڈیوز لوڈ ہونے دیں۔"
+        : "No video found in your cache yet — connect your channel and let the videos load first.";
+    }
+    const r = data.latestReview;
+    const v = data.latestVideo;
+    const head = ur
+      ? `آپ کی تازہ ترین ویڈیو: “${v.title}” (${fmt(v.views)} ویوز)۔\n\n`
+      : `Your latest video: “${v.title}” (${fmt(v.views)} views).\n\n`;
+    const scoreLines: string[] = [];
+    if (r.titleScore !== null) {
+      scoreLines.push(
+        ur
+          ? `• ٹائٹل اسکور: ${r.titleScore}/100`
+          : `• Title score: ${r.titleScore}/100`
+      );
+    }
+    if (r.thumbScore !== null) {
+      scoreLines.push(
+        ur
+          ? `• تھمبنیل کانسیپٹ اسکور: ${r.thumbScore}/100`
+          : `• Thumbnail concept score: ${r.thumbScore}/100`
+      );
+    }
+    if (r.consistency !== null) {
+      scoreLines.push(
+        ur
+          ? `• ٹائٹل، تفصیل، اسکرپٹ اور تھمبنیل کا میچ: ${r.consistency}/100`
+          : `• Title ↔ description ↔ script ↔ thumbnail match: ${r.consistency}/100`
+      );
+    }
+    const failed = r.checks.filter((c) => !c.pass);
+    const fixLines = (r.fixes.length > 0 ? r.fixes : failed.map((c) => c.detail)).slice(0, 3);
+    return (
+      head +
+      (scoreLines.length > 0 ? scoreLines.join("\n") + "\n\n" : "") +
+      (fixLines.length > 0
+        ? `${ur ? "پہلے یہ ٹھیک کریں:" : "Fix first:"}\n${fixLines.map((f, i) => `${i + 1}. ${f}`).join("\n")}`
+        : ur
+          ? "تمام بنیادی جانچ پاس — اب اگلی ویڈیو کے ٹائٹل اور تھمبنیل پر توجہ دیں۔"
+          : "All basic checks pass — focus on the next video's title and thumbnail.") +
+      (ur
+        ? "\n\nمکمل تجزیہ Optimize → ویڈیو پر کلک کریں۔"
+        : "\n\nFull analysis: Optimize → tap the video.")
+    );
+  }
+
+  if (intent === "script") {
+    const topic = scriptTopic(message, data);
+    if (!topic) {
+      return ur
+        ? "کس موضوع پر اسکرپٹ چاہیے؟ مثلاً: “Write a script about gold prices”۔"
+        : "Which topic should the script be about? For example: “Write a script about gold prices”.";
+    }
+    const pack = generateSeoPack(topic, data.channel?.title ?? undefined);
+    const total = pack.scriptOutline.reduce((s, sec) => s + sec.seconds, 0);
+    const mins = Math.floor(total / 60);
+    const secs = total % 60;
+    const sections = pack.scriptOutline
+      .map((sec, i) => {
+        const start = pack.scriptOutline
+          .slice(0, i)
+          .reduce((s, p) => s + p.seconds, 0);
+        const mm = Math.floor(start / 60);
+        const ss = String(start % 60).padStart(2, "0");
+        return `${i + 1}. [${mm}:${ss}] ${sec.section}\n   ${sec.points.join(" ")}`;
+      })
+      .join("\n\n");
+    return (
+      (ur
+        ? `“${pack.bestTitle}” کے لیے اسکرپٹ کا مسودہ (تقریباً ${mins}:${String(secs).padStart(2, "0")} منٹ) — ریکارڈ کرنے سے پہلے اپنی آواز میں ڈھال لیں:\n\nہک: ${pack.hook}\n\n`
+        : `Draft script for “${pack.bestTitle}” (about ${mins}:${String(secs).padStart(2, "0")}) — adapt it to your own voice before recording:\n\nHook: ${pack.hook}\n\n`) +
+      sections
+    );
+  }
+
+  // intent === "community"
+  if (!data.channel) return noChannel(lang);
+  const latest = data.latestVideo;
+  if (!latest) {
+    return ur
+      ? `کمیونٹی پوسٹ کا مسودہ:\n\n“السلام علیکم! آپ کس موضوع پر اگلی ویڈیو دیکھنا چاہیں گے؟ کمنٹس میں بتائیں — اگلی ویڈیو آپ کی پسند پر ہوگی۔”\n\n(ابھی کوئی ویڈیو محفوظ نہیں، اس لیے یہ عمومی پوسٹ ہے۔)`
+      : `Draft community post:\n\n“Hello everyone — what topic should my next video cover? Tell me in the comments, and the next video will be on your pick.”\n\n(No video in the cache yet, so this is a general post.)`;
+  }
+  return ur
+    ? `کمیونٹی پوسٹ کا مسودہ:\n\n“نئی ویڈیو آ گئی ہے: “${latest.title}” — دیکھیے اور بتائیے، آپ کے خیال میں اس کہانی کا سب سے اہم حصہ کون سا تھا؟ کمنٹس میں لکھیں!”\n\nویڈیو کا لنک نیچے کمنٹس میں ہے۔`
+    : `Draft community post:\n\n“New video out now: “${latest.title}” — watch it and tell me, what was the most important part of this story for you? Let me know in the comments!”\n\nLink to the video is in the comments below.`;
+}
 
 export type AssistantLang = "en" | "ur";
 

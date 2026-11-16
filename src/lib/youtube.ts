@@ -202,3 +202,64 @@ export async function searchVideos(
       channelTitle: it.snippet?.channelTitle ?? "",
     }));
 }
+
+export type YtComment = {
+  commentId: string;
+  author: string;
+  authorAvatar: string | null;
+  text: string;
+  likes: number;
+  publishedAt: string;
+  videoId: string;
+};
+
+/**
+ * Top-level comments for one video (commentThreads.list, 1 quota unit
+ * per call). Public API-key read — no OAuth needed. Returns the most
+ * relevant comments first, as YouTube ranks them.
+ */
+export async function fetchTopComments(
+  videoId: string,
+  max = 20
+): Promise<YtComment[]> {
+  const key = apiKey();
+  const params = new URLSearchParams({
+    part: "snippet",
+    videoId,
+    maxResults: String(Math.min(Math.max(max, 1), 50)),
+    order: "relevance",
+    textFormat: "plainText",
+    key,
+  });
+  const data = (await yt(`/commentThreads?${params.toString()}`)) as {
+    items?: Array<{
+      id?: string;
+      snippet?: {
+        topLevelComment?: {
+          snippet?: {
+            authorDisplayName?: string;
+            authorProfileImageUrl?: string;
+            textDisplay?: string;
+            likeCount?: number;
+            publishedAt?: string;
+          };
+        };
+      };
+    }>;
+  };
+  return (data.items ?? [])
+    .map((it) => {
+      const s = it.snippet?.topLevelComment?.snippet;
+      if (!s?.textDisplay) return null;
+      return {
+        commentId: it.id ?? `${videoId}-${s.publishedAt ?? ""}`,
+        author: s.authorDisplayName ?? "A viewer",
+        authorAvatar: s.authorProfileImageUrl ?? null,
+        text: s.textDisplay,
+        likes: Number(s.likeCount ?? 0),
+        publishedAt: s.publishedAt ?? "",
+        videoId,
+      } as YtComment;
+    })
+    .filter((c): c is YtComment => c !== null);
+}

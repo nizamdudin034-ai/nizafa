@@ -148,7 +148,19 @@ CREATE POLICY "public read yt_cache" ON yt_cache
 -- ── 5. settings: RLS enabled, NO policy → service role only ────────────
 -- (Nothing to create. Any direct anon/authenticated read or write is denied.)
 
--- ── Verification (run after applying; expect 17 rows, then 16 policies) ──
+-- ── 6. channel_snapshots (added 2026-11-16, Competitors growth history) ─
+-- A user sees snapshots only for channels they own. Writes go through the
+-- service-role admin client, which bypasses RLS.
+ALTER TABLE channel_snapshots ENABLE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS "own channel_snapshots" ON channel_snapshots;
+CREATE POLICY "own channel_snapshots" ON channel_snapshots
+  FOR SELECT USING (
+    EXISTS (SELECT 1 FROM channels c
+            WHERE c.id = channel_snapshots.channel_id
+              AND c.user_id = auth.uid())
+  );
+
+-- ── Verification (run after applying; expect 18 rows, then 17 policies) ──
 -- SELECT tablename, rowsecurity FROM pg_tables
 --  WHERE schemaname = 'public' ORDER BY tablename;
 -- SELECT schemaname, tablename, policyname, cmd

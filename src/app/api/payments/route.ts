@@ -65,6 +65,27 @@ export async function POST(req: Request) {
     );
   }
   const admin = createSupabaseAdmin();
+  // Reject a wallet method whose receiving number the owner has not set
+  // up yet (e.g. JazzCash) — the customer would otherwise pay nowhere.
+  if (method === "easypaisa" || method === "jazzcash") {
+    const key = method === "easypaisa" ? "easypaisa_number" : "jazzcash_number";
+    const { data: rows } = await admin
+      .from("settings")
+      .select("key,value")
+      .in("key", ["easypaisa_number", "jazzcash_number"]);
+    const setUp = new Set((rows ?? []).filter((r) => r.value).map((r) => r.key as string));
+    if (!setUp.has(key)) {
+      const label = method === "easypaisa" ? "Easypaisa" : "JazzCash";
+      const alternatives: string[] = (["easypaisa_number", "jazzcash_number"] as const)
+        .filter((k) => k !== key && setUp.has(k))
+        .map((k) => (k === "easypaisa_number" ? "Easypaisa" : "JazzCash"));
+      alternatives.push("Stripe");
+      return NextResponse.json(
+        { error: `${label} is not set up yet — please pay with ${alternatives.join(" or ")}.` },
+        { status: 400 }
+      );
+    }
+  }
   await ensureAppUser(admin, user.id, user.email);
   const { data, error } = await admin
     .from("payments")

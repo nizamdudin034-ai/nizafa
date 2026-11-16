@@ -1,165 +1,142 @@
-"use client";
-
-import { useRef, useState } from "react";
+import { createSupabaseServer, isSupabaseConfigured } from "@/lib/supabase-server";
+import { getSessionUser } from "@/lib/auth";
 import { SectionTitle } from "@/components/ui";
+import AssistantChat, { type AssistantCard } from "@/components/AssistantChat";
+import type { TrendItem } from "@/lib/trends";
 
-type Msg = { role: "user" | "assistant"; content: string; grounded?: boolean };
+export const dynamic = "force-dynamic";
 
-const SUGGESTIONS = [
-  "How do I write better titles?",
-  "How is my channel doing?",
-  "What makes a good thumbnail?",
-  "When should I post my videos?",
-  "How do I grow my subscribers?",
-  "بہتر ٹائٹل کیسے لکھوں؟",
-];
+/** First word of a name, or null when there is nothing usable. */
+function firstName(value: string | null | undefined): string | null {
+  const first = (value ?? "").trim().split(/\s+/)[0] ?? "";
+  return first.length > 0 ? first : null;
+}
 
-export default function AssistantPage() {
-  const [messages, setMessages] = useState<Msg[]>([]);
-  const [input, setInput] = useState("");
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [conversationId, setConversationId] = useState<number | null>(null);
-  const listRef = useRef<HTMLDivElement>(null);
+function stripChannelSuffix(title: string): string {
+  return title.replace(/\s*\|\s*[^|]+$/, "").trim();
+}
 
-  async function send(text?: string) {
-    const message = (text ?? input).trim();
-    if (!message || busy) return;
-    setInput("");
-    setError(null);
-    setBusy(true);
-    const next = [...messages, { role: "user" as const, content: message }];
-    setMessages(next);
+export default async function AssistantPage() {
+  const user = await getSessionUser();
+  const configured = isSupabaseConfigured();
+
+  let greetingName: string | null = null;
+  let channelTitle: string | null = null;
+  let channelAvatar: string | null = null;
+  let scriptTopic: string | null = null;
+
+  if (user && configured) {
     try {
-      const res = await fetch("/api/assistant", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ message, conversationId }),
-      });
-      const data = (await res.json()) as {
-        answer?: string;
-        grounded?: boolean;
-        conversationId?: number;
-        error?: string;
-      };
-      if (!res.ok || !data.answer) {
-        throw new Error(data.error ?? "The Assistant could not answer right now.");
+      const supabase = createSupabaseServer();
+      const { data: appUser } = await supabase
+        .from("app_users")
+        .select("name")
+        .eq("id", user.id)
+        .maybeSingle();
+      greetingName = firstName(appUser?.name as string | null);
+
+      const { data: ch } = await supabase
+        .from("channels")
+        .select("id,title,avatar_url")
+        .eq("user_id", user.id)
+        .eq("role", "own")
+        .order("connected_at", { ascending: true })
+        .limit(1)
+        .maybeSingle();
+      if (ch) {
+        channelTitle = ch.title as string;
+        channelAvatar = ch.avatar_url as string | null;
+        greetingName = greetingName ?? firstName(channelTitle);
       }
-      if (data.conversationId) setConversationId(data.conversationId);
-      setMessages([
-        ...next,
-        {
-          role: "assistant",
-          content: data.answer,
-          grounded: data.grounded,
-        },
-      ]);
-      requestAnimationFrame(() => {
-        listRef.current?.scrollTo({ top: listRef.current.scrollHeight, behavior: "smooth" });
-      });
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Something went wrong.");
-      setMessages(next);
-    } finally {
-      setBusy(false);
+
+      // Topic for the "Write a script" card: today's top trending topic,
+      // else the latest pack's topic, else the latest video's topic.
+      const { data: snap } = await supabase
+        .from("trending_snapshots")
+        .select("items")
+        .order("fetched_at", { ascending: false })
+        .limit(1)
+        .maybeSingle();
+      const trends = ((snap?.items ?? []) as TrendItem[]).filter(
+        (t) => t && typeof t.title === "string"
+      );
+      if (trends[0]) scriptTopic = trends[0].title;
+      if (!scriptTopic) {
+        const { data: pkg } = await supabase
+          .from("packages")
+          .select("topic")
+          .eq("kind", "package")
+          .order("created_at", { ascending: false })
+          .limit(1)
+          .maybeSingle();
+        if (pkg?.topic) scriptTopic = pkg.topic as string;
+      }
+      if (!scriptTopic && ch) {
+        const { data: vid } = await supabase
+          .from("channel_videos")
+          .select("title")
+          .eq("channel_id", (ch as { id: number }).id)
+          .order("published_at", { ascending: false })
+          .limit(1)
+          .maybeSingle();
+        if (vid?.title) scriptTopic = stripChannelSuffix(vid.title as string);
+      }
+    } catch {
+      // Greeting and card topics are a bonus — the chat works without them.
     }
   }
 
+  const cards: AssistantCard[] = [
+    {
+      icon: "bulb",
+      title: "Give me video ideas",
+      sub: "Personalized ideas based on your niche",
+      prompt: "Give me video ideas for my channel",
+    },
+    {
+      icon: "trend",
+      title: "Get more views",
+      sub: "Tips tailored to your channel",
+      prompt: "How can I get more views on my channel?",
+    },
+    {
+      icon: "eye",
+      title: "Channel audit",
+      sub: "A full review of what to improve",
+      prompt: "Run a channel audit for my channel",
+    },
+    {
+      icon: "video",
+      title: "Review my latest video",
+      sub: "Get actionable feedback on your content",
+      prompt: "Review my latest video",
+    },
+    {
+      icon: "doc",
+      title: "Write a script",
+      sub: scriptTopic
+        ? `Try a script about ${scriptTopic}`
+        : "Try a script about your niche",
+      prompt: scriptTopic
+        ? `Write a script about ${scriptTopic}`
+        : "Write a video script",
+    },
+    {
+      icon: "chat",
+      title: "Community post",
+      sub: "Draft a post to engage your audience",
+      prompt: "Draft a community post to engage my audience",
+    },
+  ];
+
   return (
     <>
-      <section className="hero">
-        <div className="kicker">Nizafa Assistant</div>
-        <h1>Ask about growing your channel</h1>
-        <p className="muted">
-          Answers in your language — English or Urdu. When your question is
-          about your own channel, the answer is built from your real channel
-          data. Sign in to keep your chat history.
-        </p>
-      </section>
-
-      <section className="section">
-        <div className="card" style={{ padding: 0, overflow: "hidden" }}>
-          <div
-            ref={listRef}
-            style={{ maxHeight: "52vh", overflowY: "auto", padding: 16, display: "grid", gap: 12, alignContent: "start" }}
-          >
-            {messages.length === 0 ? (
-              <div>
-                <p className="muted" style={{ marginBottom: 12 }}>
-                  Try one of these, or ask anything about titles, tags,
-                  thumbnails, posting times, Shorts and watch time.
-                </p>
-                <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
-                  {SUGGESTIONS.map((s) => (
-                    <button key={s} type="button" className="btn btn-ghost btn-sm" onClick={() => send(s)}>
-                      {s}
-                    </button>
-                  ))}
-                </div>
-              </div>
-            ) : (
-              messages.map((m, i) => (
-                <div
-                  key={i}
-                  style={{
-                    display: "flex",
-                    justifyContent: m.role === "user" ? "flex-end" : "flex-start",
-                  }}
-                >
-                  <div
-                    style={{
-                      maxWidth: "85%",
-                      padding: "10px 14px",
-                      borderRadius: 12,
-                      background: m.role === "user" ? "var(--teal-700)" : "var(--surface-2)",
-                      color: m.role === "user" ? "#fff" : "var(--ink)",
-                      whiteSpace: "pre-wrap",
-                      wordBreak: "break-word",
-                    }}
-                  >
-                    {m.content}
-                    {m.grounded ? (
-                      <div
-                        className="small"
-                        style={{ marginTop: 6, color: m.role === "user" ? "#ffe9a8" : "var(--teal-600)", fontWeight: 700 }}
-                      >
-                        ✓ Answered from your channel data
-                      </div>
-                    ) : null}
-                  </div>
-                </div>
-              ))
-            )}
-            {busy ? <p className="small muted">Thinking…</p> : null}
-          </div>
-          <form
-            onSubmit={(e) => {
-              e.preventDefault();
-              send();
-            }}
-            style={{ display: "flex", gap: 8, padding: 12, borderTop: "1px solid var(--line)" }}
-          >
-            <input
-              className="input"
-              value={input}
-              onChange={(e) => setInput(e.target.value)}
-              placeholder="Ask in English or اردو…"
-              aria-label="Your question"
-              maxLength={1000}
-              style={{ flex: 1, minWidth: 0 }}
-            />
-            <button type="submit" className="btn btn-primary" disabled={busy || !input.trim()}>
-              Send
-            </button>
-          </form>
-        </div>
-        {error ? <p className="error" style={{ marginTop: 12 }}>{error}</p> : null}
-        <p className="small muted" style={{ marginTop: 12 }}>
-          The Assistant answers from a curated YouTube-growth playbook and
-          your connected channel data. It does not invent view counts or
-          subscribers — if your channel is not connected, it says so.
-        </p>
-      </section>
+      <AssistantChat
+        greetingName={greetingName}
+        channelTitle={channelTitle}
+        channelAvatar={channelAvatar}
+        cards={cards}
+      />
 
       <section className="section">
         <SectionTitle title="What the Assistant knows" sub="Original guidance written for Nizafa creators." />

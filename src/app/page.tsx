@@ -1,9 +1,15 @@
 import Link from "next/link";
 import { createSupabaseServer, isSupabaseConfigured } from "@/lib/supabase-server";
 import { getSessionUser } from "@/lib/auth";
-import { StatCard, SectionTitle, EmptyState } from "@/components/ui";
+import { SectionTitle, EmptyState } from "@/components/ui";
 import ConnectChannel from "@/components/ConnectChannel";
 import OnboardingTour from "@/components/OnboardingTour";
+import HomeShell from "@/components/HomeShell";
+import ConsistencyCard, { type ConsistencyInitial } from "@/components/ConsistencyCard";
+import TagsCard from "@/components/TagsCard";
+import LatestVideoCard, { type LatestVideoData } from "@/components/LatestVideoCard";
+import { scoreConsistency, scoreTag } from "@/lib/consistency";
+import { topicKeywords, type SeoPack } from "@/lib/generator";
 
 export const dynamic = "force-dynamic";
 
@@ -36,6 +42,7 @@ type PackageRow = {
   kind: string;
   topic: string;
   created_at: string;
+  payload_json: SeoPack & { chosenTitle?: string; chosenAt?: string };
 };
 
 function fmt(n: number | null | undefined): string {
@@ -52,6 +59,26 @@ function hoursSince(iso: string | null): number {
 
 function vph(v: VideoRow): number {
   return Math.round((v.view_count ?? 0) / hoursSince(v.published_at));
+}
+
+function median(nums: number[]): number {
+  if (nums.length === 0) return 0;
+  const sorted = [...nums].sort((a, b) => a - b);
+  const mid = Math.floor(sorted.length / 2);
+  return sorted.length % 2 === 0
+    ? Math.round((sorted[mid - 1] + sorted[mid]) / 2)
+    : sorted[mid];
+}
+
+/** Next "round" milestone above n (e.g. 61,047 → 60K–65K; 225 → 200–300). */
+function milestone(n: number): { prev: number; next: number } {
+  if (n < 1000) {
+    const next = Math.ceil((n + 1) / 100) * 100;
+    return { prev: next - 100, next };
+  }
+  const step = Math.pow(10, Math.floor(Math.log10(n))) / 2;
+  const next = Math.ceil((n + 1) / step) * step;
+  return { prev: next - step, next };
 }
 
 export default async function Home({
@@ -80,7 +107,7 @@ export default async function Home({
           .order("connected_at", { ascending: true }),
         supabase
           .from("packages")
-          .select("id,kind,topic,created_at")
+          .select("id,kind,topic,created_at,payload_json")
           .order("created_at", { ascending: false })
           .limit(6),
         supabase
@@ -121,7 +148,6 @@ export default async function Home({
   }
 
   const selected = selectedChannel;
-  const own = channels.find((c) => c.role === "own");
   const topVideos = [...videos].sort((a, b) => vph(b) - vph(a)).slice(0, 5);
   const maxVph = Math.max(1, ...topVideos.map((v) => vph(v)));
 
@@ -135,20 +161,106 @@ export default async function Home({
   }
   const maxBucket = Math.max(1, ...buckets);
 
+  // Latest video + performance vs the channel median (views/hour).
+  const latestVideo = videos[0] ?? null;
+  const vphs = videos.map((v) => vph(v));
+  const medianVph = median(vphs);
+  let latestVideoData: LatestVideoData | null = null;
+  if (latestVideo) {
+    const ageHours = hoursSince(latestVideo.published_at);
+    const sorted = [...videos].sort((a, b) => vph(b) - vph(a));
+    const rank = sorted.findIndex((v) => v.video_id === latestVideo.video_id) + 1;
+    latestVideoData = {
+      videoId: latestVideo.video_id,
+      title: latestVideo.title,
+      url: latestVideo.url,
+      publishedAt: latestVideo.published_at,
+      viewCount: latestVideo.view_count,
+      likeCount: latestVideo.like_count,
+      vph: vph(latestVideo),
+      medianVph,
+      rankLabel:
+        ageHours < 48
+          ? "Too early"
+          : `#${rank} of ${videos.length} by views/hour`,
+    };
+  }
+
+  // Latest SEO pack → consistency + tag scores (all computed from the
+  // pack's own saved text and the live trending snapshot).
+  const latestPack = packages.find(
+    (p) => p.kind === "package" && p.payload_json && p.payload_json.bestTitle
+  );
+  let consistencyInitial: ConsistencyInitial | null = null;
+  let tagScores: Array<{ tag: string; score: number; signals: string[] }> = [];
+  if (latestPack) {
+    const pack = latestPack.payload_json;
+    const currentTitle = pack.chosenTitle ?? pack.bestTitle;
+    const description = pack.descriptionStarter ?? "";
+    const scriptText = (pack.scriptOutline ?? [])
+      .flatMap((s) => [s.section, ...s.points])
+      .join(" ");
+    const thumbnailText = (pack.thumbnailConcepts ?? [])
+      .map((c) => `${c.bigText} ${c.layout}`)
+      .join(" ");
+    consistencyInitial = {
+      packageId: latestPack.id,
+      topic: pack.topic,
+      currentTitle,
+      consistency: scoreConsistency({
+        title: currentTitle,
+        description,
+        scriptText,
+        thumbnailText,
+      }),
+      alternatives: (pack.titles ?? [])
+        .filter((t) => t.title !== currentTitle)
+        .map((t) => ({
+          title: t.title,
+          score: scoreConsistency({ title: t.title, description, scriptText, thumbnailText }).score,
+          titleScore: t.score,
+          why: t.why,
+        }))
+        .sort((a, b) => b.score - a.score || b.titleScore - a.titleScore)
+        .slice(0, 3),
+    };
+    const keywords = topicKeywords(pack.topic);
+    const trendingTitles = trending.map((t) => t.title);
+    tagScores = (pack.tags ?? []).map((tag) =>
+      scoreTag(tag, {
+        title: currentTitle,
+        description,
+        topicKeywords: keywords,
+        trendingTitles,
+      })
+    );
+  }
+
+  const subs = selected?.subscriber_count ?? 0;
+  const views = selected?.view_count ?? 0;
+  const subsMile = milestone(subs);
+  const viewsMile = milestone(views);
+  const subsPct = Math.max(
+    4,
+    Math.min(100, Math.round(((subs - subsMile.prev) / (subsMile.next - subsMile.prev)) * 100))
+  );
+  const viewsPct = Math.max(
+    4,
+    Math.min(100, Math.round(((views - viewsMile.prev) / (viewsMile.next - viewsMile.prev)) * 100))
+  );
+
   return (
     <>
       {user ? <OnboardingTour /> : null}
-      <section className="hero">
-        <div className="kicker">Nizafa · YouTube SEO &amp; Growth Tool</div>
-        <h1>
-          {selected ? `${selected.title} — your channel, at a glance` : "Grow your YouTube channel"}
-        </h1>
-        <p className="muted">
-          Real stats from the YouTube Data API, trending topics, and SEO packs
-          built from your own videos. No copied scores — every number comes
-          from live public data.
-        </p>
-      </section>
+      <HomeShell
+        channels={channels.map((c) => ({
+          id: c.id,
+          title: c.title,
+          avatarUrl: c.avatar_url,
+        }))}
+        selectedId={selected?.id ?? null}
+        email={user?.email ?? null}
+      />
 
       {!configured ? (
         <div className="notice" style={{ marginTop: 16 }}>
@@ -161,80 +273,130 @@ export default async function Home({
       {loadError ? <p className="error" style={{ marginTop: 16 }}>{loadError}</p> : null}
 
       {configured && channels.length === 0 ? (
-        <div className="section">
-          <ConnectChannel />
-        </div>
+        <>
+          <section className="hero">
+            <div className="kicker">Nizafa · YouTube SEO &amp; Growth Tool</div>
+            <h1>Grow your YouTube channel</h1>
+            <p className="muted">
+              Real stats from the YouTube Data API, trending topics, and SEO
+              packs built from your own videos. No copied scores — every
+              number comes from live public data.
+            </p>
+          </section>
+          <div className="section">
+            <ConnectChannel />
+          </div>
+        </>
       ) : null}
 
       {selected ? (
         <>
+          {/* Channel stats — subscribers & views with progress to the next milestone. */}
           <section className="section">
-            <div className="card" style={{ display: "flex", gap: 16, alignItems: "flex-start" }}>
-              {selected.avatar_url ? (
-                // eslint-disable-next-line @next/next/no-img-element
-                <img
-                  src={selected.avatar_url}
-                  alt=""
-                  width={72}
-                  height={72}
-                  style={{ borderRadius: "50%", flex: "none" }}
-                />
-              ) : (
-                <div
-                  style={{
-                    width: 72, height: 72, borderRadius: "50%", flex: "none",
-                    background: "var(--teal-700)", color: "#fff",
-                    display: "grid", placeItems: "center",
-                    fontSize: 30, fontWeight: 800,
-                  }}
-                >
-                  {selected.title.charAt(0)}
+            <div className="card milestone-card">
+              <div className="milestone-half">
+                <div className="stat-label">Subscribers</div>
+                <div className="stat-num">{fmt(subs)}</div>
+                <div className="meter">
+                  <span style={{ width: `${subsPct}%` }} />
                 </div>
-              )}
-              <div style={{ minWidth: 0 }}>
-                <h2 style={{ marginBottom: 2 }}>{selected.title}</h2>
-                <p className="small muted" style={{ marginBottom: 8 }}>
-                  <a href={selected.url} target="_blank" rel="noreferrer">
-                    {selected.url}
-                  </a>
-                  {" · "}
-                  <span className="badge badge-teal">{selected.role === "own" ? "Your channel" : "Competitor"}</span>
-                </p>
-                {selected.description ? (
-                  <p className="small" style={{ marginBottom: 0 }}>
-                    {selected.description.slice(0, 280)}
-                    {selected.description.length > 280 ? "…" : ""}
-                  </p>
-                ) : null}
-                {channels.length > 1 ? (
-                  <p className="small" style={{ marginTop: 8, marginBottom: 0 }}>
-                    Switch channel:{" "}
-                    {channels.map((c) => (
-                      <span key={c.id}>
-                        <Link href={`/?channel=${c.id}`}>{c.title}</Link>{" "}
-                      </span>
-                    ))}
-                  </p>
-                ) : null}
+                <div className="meter-labels">
+                  <span>{fmt(subsMile.prev)}</span>
+                  <span>{fmt(subsMile.next)}</span>
+                </div>
               </div>
+              <div className="milestone-half">
+                <div className="stat-label">Views</div>
+                <div className="stat-num">{fmt(views)}</div>
+                <div className="meter">
+                  <span style={{ width: `${viewsPct}%` }} />
+                </div>
+                <div className="meter-labels">
+                  <span>{fmt(viewsMile.prev)}</span>
+                  <span>{fmt(viewsMile.next)}</span>
+                </div>
+              </div>
+              <div className="milestone-foot">
+                <span>
+                  <strong>{fmt(selected.video_count)}</strong> videos
+                </span>
+                <span>
+                  Best <strong>{topVideos.length ? `${vph(topVideos[0])}/h` : "—"}</strong>
+                  {topVideos.length ? ` · ${topVideos[0].title.slice(0, 42)}` : ""}
+                </span>
+                <span className="badge badge-teal">
+                  {selected.role === "own" ? "Your channel" : "Competitor"}
+                </span>
+                <a href={selected.url} target="_blank" rel="noreferrer">
+                  {selected.url}
+                </a>
+              </div>
+              {selected.description ? (
+                <p className="small muted" style={{ marginBottom: 0 }}>
+                  {selected.description.slice(0, 280)}
+                  {selected.description.length > 280 ? "…" : ""}
+                </p>
+              ) : null}
             </div>
           </section>
 
-          <section className="section">
-            <div className="grid grid-4">
-              <StatCard label="Subscribers" value={fmt(selected.subscriber_count)} />
-              <StatCard label="Total views" value={fmt(selected.view_count)} />
-              <StatCard label="Videos" value={fmt(selected.video_count)} />
-              <StatCard
-                label="Best VPH"
-                value={topVideos.length ? `${vph(topVideos[0])}/h` : "—"}
-                sub={topVideos.length ? topVideos[0].title.slice(0, 42) : "No videos yet"}
-              />
-            </div>
-          </section>
+          <div className="home-grid">
+            {latestVideoData ? (
+              <section className="section home-grid-item">
+                <LatestVideoCard video={latestVideoData} />
+              </section>
+            ) : null}
 
-          <section className="section">
-            <div className="grid grid-2">
+            {consistencyInitial ? (
+              <section className="section home-grid-item">
+                <ConsistencyCard initial={consistencyInitial} />
+              </section>
+            ) : (
+              <section className="section home-grid-item">
+                <div className="card">
+                  <SectionTitle
+                    title="Title match & consistency"
+                    sub="Generate an SEO pack first — then Nizafa scores how well its title, description, script and thumbnail match, and suggests better titles."
+                    action={<Link href="/generate" className="btn btn-primary btn-sm">Generate a pack →</Link>}
+                  />
+                </div>
+              </section>
+            )}
+
+            {latestPack && tagScores.length > 0 ? (
+              <section className="section home-grid-item">
+                <TagsCard tags={tagScores} topic={latestPack.topic} />
+              </section>
+            ) : null}
+
+            <section className="section home-grid-item">
+              <div className="card">
+                <SectionTitle
+                  title="Trending now"
+                  sub={trendingAt ? `Snapshot from ${new Date(trendingAt).toLocaleString()}` : "US + Pakistan, refreshed daily."}
+                  action={<Link href="/research" className="btn btn-ghost btn-sm">Research →</Link>}
+                />
+                {trending.length === 0 ? (
+                  <p className="muted">
+                    No trending snapshot yet.{" "}
+                    <a href="/api/trending">Refresh trending</a> (fetches the public Google Trends feeds).
+                  </p>
+                ) : (
+                  trending.map((t, i) => (
+                    <div className="list-row" key={`${t.geo}-${t.title}-${i}`}>
+                      <span className="trend-rank">{i + 1}</span>
+                      <span className="badge">{t.geo}</span>
+                      <div style={{ minWidth: 0 }}>
+                        <strong>{t.title}</strong>
+                        <div className="small muted">{t.traffic ? `${t.traffic} searches` : ""}</div>
+                      </div>
+                    </div>
+                  ))
+                )}
+              </div>
+            </section>
+
+            <section className="section home-grid-item">
               <div className="card">
                 <SectionTitle title="Views per hour — top videos" sub="Views ÷ hours since publish, from your real video data." />
                 {topVideos.length === 0 ? (
@@ -264,6 +426,9 @@ export default async function Home({
                   </div>
                 )}
               </div>
+            </section>
+
+            <section className="section home-grid-item">
               <div className="card">
                 <SectionTitle title="Best time to post" sub="When your videos were published, by time of day (UTC)." />
                 <div className="heatmap">
@@ -305,67 +470,42 @@ export default async function Home({
                   )}
                 </div>
               </div>
-            </div>
-          </section>
+            </section>
+
+            <section className="section home-grid-item">
+              <div className="card">
+                <SectionTitle
+                  title="Recent SEO packs"
+                  sub="Your latest generated titles, tags and full packages."
+                  action={<Link href="/generate" className="btn btn-primary btn-sm">New pack →</Link>}
+                />
+                {packages.length === 0 ? (
+                  <EmptyState
+                    title="No packs yet"
+                    body="Generate your first SEO pack for a video topic — titles, tags, hashtags, description, outline and thumbnail ideas in one click."
+                    action={<Link href="/generate" className="btn btn-primary">Generate a pack</Link>}
+                  />
+                ) : (
+                  packages.map((p) => (
+                    <div className="list-row" key={p.id}>
+                      <span className="badge badge-gold">{p.kind}</span>
+                      <div style={{ minWidth: 0 }}>
+                        <strong>{p.topic}</strong>
+                        <div className="small muted">
+                          {new Date(p.created_at).toLocaleString()}
+                        </div>
+                      </div>
+                    </div>
+                  ))
+                )}
+                <p style={{ marginTop: 16, marginBottom: 0 }}>
+                  <Link href="/ideas">Today&apos;s ideas for your channel →</Link>
+                </p>
+              </div>
+            </section>
+          </div>
         </>
       ) : null}
-
-      <section className="section">
-        <div className="grid grid-2">
-          <div className="card">
-            <SectionTitle
-              title="Trending now"
-              sub={trendingAt ? `Snapshot from ${new Date(trendingAt).toLocaleString()}` : "US + Pakistan, refreshed daily."}
-              action={<Link href="/research" className="btn btn-ghost btn-sm">Research →</Link>}
-            />
-            {trending.length === 0 ? (
-              <p className="muted">
-                No trending snapshot yet.{" "}
-                <a href="/api/trending">Refresh trending</a> (fetches the public Google Trends feeds).
-              </p>
-            ) : (
-              trending.map((t, i) => (
-                <div className="list-row" key={`${t.geo}-${t.title}-${i}`}>
-                  <span className="badge">{t.geo}</span>
-                  <div style={{ minWidth: 0 }}>
-                    <strong>{t.title}</strong>
-                    <div className="small muted">{t.traffic ? `${t.traffic} searches` : ""}</div>
-                  </div>
-                </div>
-              ))
-            )}
-          </div>
-          <div className="card">
-            <SectionTitle
-              title="Recent SEO packs"
-              sub="Your latest generated titles, tags and full packages."
-              action={<Link href="/generate" className="btn btn-primary btn-sm">New pack →</Link>}
-            />
-            {packages.length === 0 ? (
-              <EmptyState
-                title="No packs yet"
-                body="Generate your first SEO pack for a video topic — titles, tags, hashtags, description, outline and thumbnail ideas in one click."
-                action={<Link href="/generate" className="btn btn-primary">Generate a pack</Link>}
-              />
-            ) : (
-              packages.map((p) => (
-                <div className="list-row" key={p.id}>
-                  <span className="badge badge-gold">{p.kind}</span>
-                  <div style={{ minWidth: 0 }}>
-                    <strong>{p.topic}</strong>
-                    <div className="small muted">
-                      {new Date(p.created_at).toLocaleString()}
-                    </div>
-                  </div>
-                </div>
-              ))
-            )}
-            <p style={{ marginTop: 16, marginBottom: 0 }}>
-              <Link href="/ideas">Today&apos;s ideas for your channel →</Link>
-            </p>
-          </div>
-        </div>
-      </section>
 
       {configured && channels.length > 0 ? (
         <section className="section">

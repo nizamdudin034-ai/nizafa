@@ -9,18 +9,21 @@ import { getSavedLang, setSavedLang, t, type Lang } from "@/lib/i18n";
 const LINKS = [
   { href: "/", key: "home" },
   { href: "/generate", key: "generate" },
+  { href: "/create", key: "create" },
   { href: "/research", key: "research" },
   { href: "/optimize", key: "optimize" },
+  { href: "/competitors", key: "competitors" },
+  { href: "/subscribers", key: "subscribers" },
+  { href: "/learn", key: "learn" },
   { href: "/thumbnails", key: "thumbnails" },
   { href: "/plans", key: "plans" },
-  { href: "/academy", key: "academy" },
 ];
 
 const BOTTOM_LINKS = [
   { href: "/", key: "home", icon: "⌂" },
-  { href: "/generate", key: "generate", icon: "✦" },
+  { href: "/optimize", key: "optimize", icon: "↗" },
+  { href: "/research", key: "research", icon: "⌕" },
   { href: "/thumbnails", key: "thumbnails", icon: "▣" },
-  { href: "/plans", key: "plans", icon: "◆" },
 ];
 
 export default function Nav() {

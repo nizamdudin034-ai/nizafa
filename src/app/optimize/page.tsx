@@ -11,6 +11,14 @@ import {
   type AuditReport,
 } from "@/lib/audit";
 import { connectCompetitorChannel } from "@/lib/competitors";
+import { scoreTitle } from "@/lib/generator";
+import { fetchVideoMeta, formatDuration } from "@/lib/video-meta";
+import {
+  matchPackToVideo,
+  scoreVideoThumbnail,
+  type PackRow,
+} from "@/lib/seo-checklist";
+import OptimizeList, { type OptimizeVideoItem } from "@/components/OptimizeList";
 
 export const dynamic = "force-dynamic";
 
@@ -82,18 +90,28 @@ export default async function OptimizePage({
   let channels: ChannelRow[] = [];
   let competitors: ChannelRow[] = [];
   let videos: VideoRow[] = [];
+  let packs: PackRow[] = [];
   let latestAudit: { report: AuditReport; created_at: string } | null = null;
   let loadError: string | null = null;
 
   if (configured) {
     try {
       const supabase = createSupabaseServer();
-      const [chRes, compRes] = await Promise.all([
+      const [chRes, compRes, packRes] = await Promise.all([
         supabase.from("channels").select("*").order("connected_at", { ascending: true }),
         supabase.from("channels").select("*").eq("role", "competitor").order("connected_at", { ascending: true }),
+        supabase
+          .from("packages")
+          .select("id,topic,payload_json")
+          .eq("kind", "package")
+          .order("created_at", { ascending: false })
+          .limit(15),
       ]);
       channels = (chRes.data ?? []) as ChannelRow[];
       competitors = (compRes.data ?? []) as ChannelRow[];
+      packs = ((packRes.data ?? []) as PackRow[]).filter(
+        (p) => p.payload_json && typeof p.payload_json === "object"
+      );
       const selected =
         channels.find((c) => String(c.id) === searchParams.channel) ??
         channels.find((c) => c.role === "own") ??
@@ -130,6 +148,37 @@ export default async function OptimizePage({
   const own = channels.find((c) => c.role === "own") ?? channels[0] ?? null;
   const selectedId =
     channels.find((c) => String(c.id) === searchParams.channel)?.id ?? own?.id;
+
+  // Live metadata (duration, privacy, tags) for the loaded videos — one
+  // batched YouTube call, cached 6h. When unavailable, the list still
+  // renders from cached data and says so.
+  const metaMap = await fetchVideoMeta(videos.map((v) => v.video_id));
+  const metaAvailable = metaMap.size > 0;
+
+  const items: OptimizeVideoItem[] = videos.map((v) => {
+    const meta = metaMap.get(v.video_id) ?? null;
+    const pack = matchPackToVideo(v.title, packs);
+    const concept = pack?.payload_json?.thumbnailConcepts?.[0] ?? null;
+    // Title score: against the matched pack's topic; without a pack, the
+    // video's own live tags are the topic. No pack and no tags = unscored.
+    const titleTopic =
+      pack?.topic ?? (meta?.tags?.length ? meta.tags.join(" ") : null);
+    return {
+      videoId: v.video_id,
+      title: v.title,
+      url: v.url,
+      publishedAt: v.published_at,
+      viewCount: v.view_count,
+      vph: viewsPerHour(v.view_count, v.published_at),
+      titleScore: titleTopic ? scoreTitle(v.title, titleTopic).score : null,
+      thumbScore: concept ? scoreVideoThumbnail(concept)?.score ?? null : null,
+      topic: pack?.topic ?? null,
+      isShort: meta?.isShort ?? null,
+      privacy: meta?.privacyStatus ?? null,
+      duration: formatDuration(meta?.durationSeconds ?? null),
+    };
+  });
+
   const scored = videos.map((v) => ({
     ...v,
     vph: viewsPerHour(v.view_count, v.published_at),
@@ -159,15 +208,14 @@ export default async function OptimizePage({
 
   return (
     <>
-      <section className="hero">
-        <div className="kicker">Optimize</div>
-        <h1>SEO scores, best posting times &amp; competitors</h1>
-        <p className="muted">
-          Rule-based scores from your real video data — title length, hooks,
-          engagement and views per hour. Nothing here is a guessed or
-          proprietary score.
+      <div className="opt-page-head">
+        <h1>Optimize</h1>
+        <p className="muted" style={{ marginBottom: 0 }}>
+          Scores for your real videos — title, thumbnail and SEO, from your
+          saved packs and live YouTube data. Tap a video to open its full
+          analysis.
         </p>
-      </section>
+      </div>
 
       {!configured ? (
         <div className="notice" style={{ marginTop: 16 }}>
@@ -210,6 +258,10 @@ export default async function OptimizePage({
                 ))}
               </p>
             ) : null}
+          </section>
+
+          <section className="section">
+            <OptimizeList videos={items} metaAvailable={metaAvailable} />
           </section>
 
           <section className="section">
@@ -362,56 +414,6 @@ export default async function OptimizePage({
                   </p>
                 )}
               </div>
-            </div>
-          </section>
-
-          <section className="section">
-            <div className="card">
-              <SectionTitle
-                title="Videos — SEO score & views per hour"
-                sub="Scores are rule-based estimates from cached video data. Descriptions and tags are not stored in the cache, so they are not scored."
-              />
-              {scored.length === 0 ? (
-                <p className="muted">No videos loaded yet.</p>
-              ) : (
-                <div style={{ overflowX: "auto" }}>
-                  <table className="table">
-                    <thead>
-                      <tr>
-                        <th>Video</th>
-                        <th>SEO</th>
-                        <th>VPH</th>
-                        <th>Views</th>
-                        <th>Published</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {scored.map((v) => (
-                        <tr key={v.video_id}>
-                          <td style={{ minWidth: 220 }}>
-                            <a href={v.url} target="_blank" rel="noreferrer" style={{ color: "var(--ink)", fontWeight: 600 }}>
-                              {v.title}
-                            </a>
-                            <div className="small muted">
-                              {v.seo.checks.filter((c) => !c.pass).map((c) => c.label).join(" · ") || "All checks pass"}
-                            </div>
-                          </td>
-                          <td>
-                            <span className={`badge ${v.seo.score >= 75 ? "badge-teal" : v.seo.score >= 55 ? "badge-gold" : "badge-red"}`}>
-                              {v.seo.score}/100
-                            </span>
-                          </td>
-                          <td>{v.vph}/h</td>
-                          <td>{fmt(v.view_count)}</td>
-                          <td className="small">
-                            {v.published_at ? new Date(v.published_at).toLocaleDateString() : "—"}
-                          </td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-              )}
             </div>
           </section>
         </>

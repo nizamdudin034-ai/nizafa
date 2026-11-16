@@ -47,6 +47,15 @@ export default function PlansPage() {
       fetch("/api/payments").then((r) => r.json()),
     ]);
     setInfo(sRes as SettingsInfo);
+    // If the currently selected method is not set up (e.g. JazzCash with
+    // no receiving number), move to the first available method.
+    const s = sRes as SettingsInfo;
+    const available = [
+      ...(s.easypaisaSet ? ["easypaisa"] : []),
+      ...(s.jazzcashSet ? ["jazzcash"] : []),
+      "stripe",
+    ];
+    setMethod((m) => (available.includes(m) ? m : available[0]));
     if (Array.isArray((pRes as { payments?: PaymentRow[] }).payments)) {
       setPayments((pRes as { payments: PaymentRow[] }).payments);
       setIsOwnerView(Boolean((pRes as { isOwner?: boolean }).isOwner));
@@ -97,6 +106,19 @@ export default function PlansPage() {
   }
 
   const currentPlan = info?.plan ?? "free";
+  // Only offer wallet methods the owner has actually set up. Stripe is
+  // always available.
+  const availableMethods = [
+    ...(info?.easypaisaSet ? ["easypaisa"] : []),
+    ...(info?.jazzcashSet ? ["jazzcash"] : []),
+    "stripe",
+  ];
+  const methodsLabel = !info
+    ? "Easypaisa, JazzCash or Stripe"
+    : availableMethods
+        .map((m) => (m === "easypaisa" ? "Easypaisa" : m === "jazzcash" ? "JazzCash" : "Stripe"))
+        .join(", ")
+        .replace(/, ([^,]*)$/, " or $1");
   const pending = payments.filter((p) => p.status === "pending");
 
   return (
@@ -105,9 +127,8 @@ export default function PlansPage() {
         <div className="kicker">Plans &amp; billing</div>
         <h1>Choose a plan</h1>
         <p className="muted">
-          Start free. Upgrade when you are ready — pay with Easypaisa,
-          JazzCash or Stripe, and the owner activates your plan after
-          checking the payment.
+          Start free. Upgrade when you are ready — pay with {methodsLabel},
+          and the owner activates your plan after checking the payment.
         </p>
         {info?.signedIn ? (
           <p>
@@ -198,8 +219,12 @@ export default function PlansPage() {
                 <div>
                   <label className="label" htmlFor="pay-method">Payment method</label>
                   <select id="pay-method" className="input" value={method} onChange={(e) => setMethod(e.target.value)}>
-                    <option value="easypaisa">Easypaisa</option>
-                    <option value="jazzcash">JazzCash</option>
+                    <option value="easypaisa" disabled={info ? !info.easypaisaSet : false}>
+                      Easypaisa{info && !info.easypaisaSet ? " (not set up yet)" : ""}
+                    </option>
+                    <option value="jazzcash" disabled={info ? !info.jazzcashSet : false}>
+                      JazzCash{info && !info.jazzcashSet ? " (not set up yet)" : ""}
+                    </option>
                     <option value="stripe">Stripe</option>
                   </select>
                 </div>

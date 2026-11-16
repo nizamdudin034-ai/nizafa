@@ -1,4 +1,4 @@
-// GET /api/daily-ideas[?channelId=…] — today's 5 ideas for the signed-in
+// GET /api/daily-ideas[?channelId=…] — today's 4 ideas for the signed-in
 // user's own channel. Generates + stores (packages kind='daily-ideas' +
 // daily_idea_runs row) when none exist for today; returns the stored set
 // otherwise. Zero search.list calls.

@@ -1,11 +1,26 @@
 "use client";
 
-// Thumbnail Studio — prompt builder, canvas composer, reference analysis
-// and a rule-based scorer. Everything visual here runs in the browser:
-// reference images are analysed on an offscreen canvas and are NEVER
-// uploaded or stored anywhere. AI image generation (if a key is set on
-// the server) goes through /api/thumbnail-image; without a key the page
-// says so honestly and the canvas composer is the way to build a thumbnail.
+// Thumbnail Studio — generator form + canvas editor + reference analysis
+// + rule-based scorer + saved compositions.
+//
+// HOUSE STYLE — DECIDED 16 Nov 2026 from the user's 6 example thumbnails
+// (THE SECRET OF TIME, MOTHER KILLED HER DAUGHTER?, THIS IS STRANGE!,
+// ELON MUSK EXPOSED, THE 1947 FILES, UFO FILES EXPOSED): 1280×720,
+// cinematic, dark moody background, strong red + blue rim lighting, high
+// contrast. Big bold distressed white text across the TOP (usually 2
+// lines); the punch word inside a solid RED box. Subject imagery fills
+// the left/centre. FACE RULE: the ONLY face in the thumbnail is the
+// person the video is about (supplied via the reference face upload) —
+// NEVER the channel owner's / creator's face.
+// Text is added afterwards in the editor with real fonts — never baked
+// into generated art.
+//
+// Everything visual here runs in the browser: reference images are
+// analysed on an offscreen canvas and are NEVER uploaded or stored
+// anywhere. AI image generation (if a key is set on the server) goes
+// through /api/thumbnail-image; without a key the page says so honestly
+// and the canvas editor is the way to build a thumbnail. Saved
+// compositions store SETTINGS only (no image data).
 
 import { useEffect, useRef, useState } from "react";
 import CopyButton from "@/components/CopyButton";
@@ -15,6 +30,7 @@ import {
   scoreThumbnailConcept,
   type ThumbnailPromptInput,
 } from "@/lib/thumbnail";
+import type { SavedThumbnail } from "@/app/api/thumbnails/saved/route";
 
 type SizeKey = "16:9" | "9:16" | "1:1";
 const SIZES: Record<SizeKey, { w: number; h: number; label: string }> = {
@@ -22,6 +38,31 @@ const SIZES: Record<SizeKey, { w: number; h: number; label: string }> = {
   "9:16": { w: 1080, h: 1920, label: "9:16 — 1080×1920 (Short)" },
   "1:1": { w: 1080, h: 1080, label: "1:1 — 1080×1080 (square)" },
 };
+
+/** Punch-box colours — solid red is the house default. */
+const BOX_COLORS = [
+  { name: "Red", value: "#d92d20" },
+  { name: "Black", value: "#111111" },
+  { name: "White", value: "#f5f5f0" },
+  { name: "Teal", value: "#0e7c6b" },
+  { name: "Gold", value: "#f5b301" },
+];
+
+/** Main top-text colours — distressed white is the house default. */
+const TEXT_COLORS = [
+  { name: "White", value: "#ffffff" },
+  { name: "Yellow", value: "#ffe600" },
+  { name: "Amber", value: "#ffd60a" },
+  { name: "Black", value: "#111111" },
+];
+
+const FONTS = [
+  { name: "Arial Black (heavy — closest to the distressed look)", value: "'Arial Black', Arial, sans-serif" },
+  { name: "Arial (clean sans)", value: "Arial, Helvetica, sans-serif" },
+  { name: "Georgia (serif)", value: "Georgia, 'Times New Roman', serif" },
+  { name: "Trebuchet (rounded)", value: "'Trebuchet MS', Verdana, sans-serif" },
+  { name: "Verdana (wide)", value: "Verdana, Geneva, sans-serif" },
+];
 
 function readFileAsImage(file: File): Promise<HTMLImageElement> {
   return new Promise((resolve, reject) => {
@@ -34,6 +75,16 @@ function readFileAsImage(file: File): Promise<HTMLImageElement> {
       img.src = String(reader.result);
     };
     reader.readAsDataURL(file);
+  });
+}
+
+function loadRemoteImage(src: string): Promise<HTMLImageElement> {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.crossOrigin = "anonymous";
+    img.onload = () => resolve(img);
+    img.onerror = () => reject(new Error("That image could not be loaded for editing."));
+    img.src = src;
   });
 }
 
@@ -50,30 +101,54 @@ function fitFont(
   text: string,
   maxWidth: number,
   startPx: number,
+  family: string,
   weight = 800
 ): number {
   let px = startPx;
   while (px > 18) {
-    ctx.font = `${weight} ${px}px Arial, Helvetica, sans-serif`;
+    ctx.font = `${weight} ${px}px ${family}`;
     if (ctx.measureText(text).width <= maxWidth) break;
     px -= 4;
   }
   return px;
 }
 
+/** Face photo cropped to the face zone with a feathered left edge, so the
+ * cutout blends into the background instead of showing a hard rectangle. */
+function featheredFace(face: HTMLImageElement, fw: number, fh: number): HTMLCanvasElement {
+  const off = document.createElement("canvas");
+  off.width = Math.max(1, Math.round(fw));
+  off.height = Math.max(1, Math.round(fh));
+  const octx = off.getContext("2d");
+  if (!octx) return off;
+  const scale = Math.max(fw / face.width, fh / face.height);
+  const dw = face.width * scale;
+  const dh = face.height * scale;
+  octx.drawImage(face, (fw - dw) / 2, (fh - dh) / 2, dw, dh);
+  const grad = octx.createLinearGradient(0, 0, fw * 0.16, 0);
+  grad.addColorStop(0, "rgba(0,0,0,0)");
+  grad.addColorStop(1, "rgba(0,0,0,1)");
+  octx.globalCompositeOperation = "destination-in";
+  octx.fillStyle = grad;
+  octx.fillRect(0, 0, fw, fh);
+  octx.globalCompositeOperation = "source-over";
+  return off;
+}
+
 export default function ThumbnailsPage() {
-  // ── (a) Prompt builder ──────────────────────────────────────────────
+  // ── (1) Generator form ──────────────────────────────────────────────
   const [topic, setTopic] = useState("");
   const [subject, setSubject] = useState("");
   const [mood, setMood] = useState<ThumbnailPromptInput["mood"]>("dramatic");
   const [punchWords, setPunchWords] = useState("");
+  const [styleNotes, setStyleNotes] = useState("");
   const [genSize, setGenSize] = useState<SizeKey>("16:9");
   const [genImage, setGenImage] = useState<string | null>(null);
   const [genNote, setGenNote] = useState<string | null>(null);
   const [generating, setGenerating] = useState(false);
 
   const prompt = topic.trim()
-    ? buildThumbnailPrompt({ topic, subject, mood, punchWords })
+    ? buildThumbnailPrompt({ topic, subject, mood, punchWords, styleNotes })
     : "";
 
   async function generateImage() {
@@ -101,22 +176,29 @@ export default function ThumbnailsPage() {
         );
       }
     } catch {
-      setGenNote("Could not reach the image service. Try the canvas composer below.");
+      setGenNote("Could not reach the image service. Try the canvas editor below.");
     } finally {
       setGenerating(false);
     }
   }
 
-  // ── (b) Canvas composer ─────────────────────────────────────────────
+  // ── (2) Editor (canvas composer) ────────────────────────────────────
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [size, setSize] = useState<SizeKey>("16:9");
-  const [preset, setPreset] = useState(0);
+  const [preset, setPreset] = useState(0); // 0 = "Cinematic dark"
   const [bgImage, setBgImage] = useState<HTMLImageElement | null>(null);
+  const [bgName, setBgName] = useState<string | null>(null);
   const [faceImage, setFaceImage] = useState<HTMLImageElement | null>(null);
-  const [bannerText, setBannerText] = useState("");
-  const [bannerPunch, setBannerPunch] = useState("");
-  const [showBanner, setShowBanner] = useState(true);
+  const [faceName, setFaceName] = useState<string | null>(null);
+  // Top text: main line in huge distressed white + punch word in a solid box.
+  const [topText, setTopText] = useState("");
+  const [punchWord, setPunchWord] = useState("");
+  const [boxColor, setBoxColor] = useState("#d92d20");
+  const [textColor, setTextColor] = useState("#ffffff");
+  const [showText, setShowText] = useState(true);
+  const [fontFamily, setFontFamily] = useState(FONTS[0].value);
   const [composerError, setComposerError] = useState<string | null>(null);
+  const [editorNote, setEditorNote] = useState<string | null>(null);
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -127,7 +209,7 @@ export default function ThumbnailsPage() {
     const ctx = canvas.getContext("2d");
     if (!ctx) return;
 
-    // Background: uploaded image (cover) or gradient preset.
+    // Background: uploaded/generated image (cover) or gradient preset.
     if (bgImage) {
       const scale = Math.max(w / bgImage.width, h / bgImage.height);
       const dw = bgImage.width * scale;
@@ -141,80 +223,105 @@ export default function ThumbnailsPage() {
       ctx.fillRect(0, 0, w, h);
     }
 
-    // Face cutout on the right third (cover-crop, blue rim light).
+    // Subject's face on the right third: feathered left edge + red/blue
+    // rim glow. This is the ONLY face in the thumbnail — never the
+    // channel owner's face.
     if (faceImage) {
       const fx = (w * 2) / 3;
       const fw = w / 3;
-      const scale = Math.max(fw / faceImage.width, h / faceImage.height);
-      const dw = faceImage.width * scale;
-      const dh = faceImage.height * scale;
+      const feathered = featheredFace(faceImage, fw, h);
       ctx.save();
-      ctx.shadowColor = "rgba(90, 160, 255, 0.9)";
+      ctx.shadowColor = "rgba(90, 160, 255, 0.7)";
       ctx.shadowBlur = 24;
-      ctx.beginPath();
-      ctx.rect(fx, 0, fw, h);
-      ctx.clip();
-      ctx.drawImage(faceImage, fx + (fw - dw) / 2, (h - dh) / 2, dw, dh);
+      ctx.drawImage(feathered, fx, 0);
       ctx.restore();
-      ctx.strokeStyle = "rgba(120, 180, 255, 0.85)";
+      // Red rim on the left edge of the cutout, blue on the right.
+      ctx.strokeStyle = "rgba(255, 60, 40, 0.55)";
       ctx.lineWidth = 4;
-      ctx.strokeRect(fx + 2, 2, fw - 4, h - 4);
+      ctx.beginPath();
+      ctx.moveTo(fx + fw * 0.16, 0);
+      ctx.lineTo(fx + fw * 0.16, h);
+      ctx.stroke();
+      ctx.strokeStyle = "rgba(90, 160, 255, 0.55)";
+      ctx.beginPath();
+      ctx.moveTo(fx + fw - 2, 0);
+      ctx.lineTo(fx + fw - 2, h);
+      ctx.stroke();
     }
 
-    // Red banner across the bottom with huge text + yellow punch word.
-    if (showBanner) {
-      const bannerH = Math.round(h * 0.26);
-      const by = h - bannerH;
-      ctx.fillStyle = "#d92d20";
-      ctx.fillRect(0, by, w, bannerH);
-      const main = bannerText.trim();
-      const punch = bannerPunch.trim();
+    // Top text: main line in huge bold distressed white, punch word in a
+    // solid box underneath. Letter-spacing gives the heavy, spaced look
+    // of the reference thumbnails.
+    if (showText) {
+      const main = topText.trim();
+      const punch = punchWord.trim();
+      const ctxLS = ctx as CanvasRenderingContext2D & { letterSpacing?: string };
+      ctxLS.letterSpacing = "2px";
+      let y = Math.round(h * 0.045);
       ctx.textAlign = "center";
-      ctx.textBaseline = "middle";
-      if (main || punch) {
-        if (main && punch) {
-          const mainPx = fitFont(ctx, main.toUpperCase(), w * 0.9, Math.round(bannerH * 0.3));
-          ctx.fillStyle = "#ffffff";
-          ctx.font = `800 ${mainPx}px Arial, Helvetica, sans-serif`;
-          ctx.fillText(main.toUpperCase(), w / 2, by + bannerH * 0.28);
-          const punchPx = fitFont(ctx, punch.toUpperCase(), w * 0.9, Math.round(bannerH * 0.42), 900);
-          ctx.fillStyle = "#ffd60a";
-          ctx.font = `900 ${punchPx}px Arial, Helvetica, sans-serif`;
-          ctx.fillText(punch.toUpperCase(), w / 2, by + bannerH * 0.74);
-        } else {
-          const text = (main || punch).toUpperCase();
-          const px = fitFont(ctx, text, w * 0.9, Math.round(bannerH * 0.5), 900);
-          ctx.fillStyle = punch && !main ? "#ffd60a" : "#ffffff";
-          ctx.font = `900 ${px}px Arial, Helvetica, sans-serif`;
-          ctx.fillText(text, w / 2, by + bannerH / 2);
-        }
-      } else {
-        ctx.fillStyle = "rgba(255,255,255,0.75)";
-        const px = Math.round(bannerH * 0.22);
-        ctx.font = `700 ${px}px Arial, Helvetica, sans-serif`;
-        ctx.fillText("YOUR BANNER TEXT HERE", w / 2, by + bannerH / 2);
+      ctx.textBaseline = "top";
+      ctx.shadowColor = "rgba(0,0,0,0.65)";
+      ctx.shadowBlur = 10;
+      ctx.shadowOffsetY = 3;
+      if (main) {
+        const mainPx = fitFont(ctx, main.toUpperCase(), w * 0.92, Math.round(h * 0.11), fontFamily, 900);
+        ctx.fillStyle = textColor;
+        ctx.font = `900 ${mainPx}px ${fontFamily}`;
+        ctx.fillText(main.toUpperCase(), w / 2, y);
+        y += Math.round(mainPx * 1.18);
       }
+      if (punch) {
+        const punchPx = fitFont(ctx, punch.toUpperCase(), w * 0.86, Math.round(h * 0.13), fontFamily, 900);
+        ctx.font = `900 ${punchPx}px ${fontFamily}`;
+        const tw = ctx.measureText(punch.toUpperCase()).width;
+        const boxPadX = Math.round(punchPx * 0.45);
+        const boxW = tw + boxPadX * 2;
+        const boxH = Math.round(punchPx * 1.45);
+        const boxX = (w - boxW) / 2;
+        ctx.fillStyle = boxColor;
+        ctx.fillRect(boxX, y, boxW, boxH);
+        const lightBox = boxColor.toLowerCase() === "#f5f5f0" || boxColor.toLowerCase() === "#ffffff";
+        ctx.fillStyle = lightBox ? "#d92d20" : "#ffffff";
+        ctx.fillText(punch.toUpperCase(), w / 2, y + Math.round((boxH - punchPx) / 2));
+      }
+      if (!main && !punch) {
+        ctx.fillStyle = "rgba(255,255,255,0.75)";
+        const px = Math.round(h * 0.045);
+        ctx.font = `700 ${px}px ${fontFamily}`;
+        ctx.fillText("YOUR TEXT HERE", w / 2, y);
+      }
+      ctx.shadowBlur = 0;
+      ctx.shadowOffsetY = 0;
+      ctxLS.letterSpacing = "0px";
     }
-  }, [size, preset, bgImage, faceImage, bannerText, bannerPunch, showBanner]);
+  }, [size, preset, bgImage, faceImage, topText, punchWord, boxColor, textColor, showText, fontFamily]);
 
   function downloadPng() {
     const canvas = canvasRef.current;
     if (!canvas) return;
-    canvas.toBlob((blob) => {
-      if (!blob) return;
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = `nizafa-thumbnail-${size.replace(":", "x")}.png`;
-      a.click();
-      URL.revokeObjectURL(url);
-    }, "image/png");
+    try {
+      canvas.toBlob((blob) => {
+        if (!blob) {
+          setComposerError("Could not export this canvas — remove any image that blocks export and try again.");
+          return;
+        }
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = `nizafa-thumbnail-${size.replace(":", "x")}.png`;
+        a.click();
+        URL.revokeObjectURL(url);
+      }, "image/png");
+    } catch {
+      setComposerError("This canvas uses an image that blocks export — remove the background image and try again.");
+    }
   }
 
   async function onBgUpload(file: File | undefined) {
     if (!file) return;
     try {
       setBgImage(await readFileAsImage(file));
+      setBgName(file.name);
       setComposerError(null);
     } catch (e) {
       setComposerError(e instanceof Error ? e.message : "Could not load that image.");
@@ -225,13 +332,26 @@ export default function ThumbnailsPage() {
     if (!file) return;
     try {
       setFaceImage(await readFileAsImage(file));
+      setFaceName(file.name);
       setComposerError(null);
     } catch (e) {
       setComposerError(e instanceof Error ? e.message : "Could not load that image.");
     }
   }
 
-  // ── (c) Reference analysis (client-side only) ───────────────────────
+  async function useGeneratedAsBackground() {
+    if (!genImage) return;
+    try {
+      const img = await loadRemoteImage(genImage);
+      setBgImage(img);
+      setBgName("AI-generated base image");
+      setEditorNote("Generated image loaded as the editor background — add your text below.");
+    } catch {
+      setEditorNote("That image could not be loaded into the editor (its provider blocks cross-origin use). Download it from the preview instead.");
+    }
+  }
+
+  // ── (3) Reference thumbnail (style only) ────────────────────────────
   const [refSummary, setRefSummary] = useState<string | null>(null);
   const [refPrompt, setRefPrompt] = useState<string | null>(null);
   const [refError, setRefError] = useState<string | null>(null);
@@ -297,12 +417,15 @@ export default function ThumbnailsPage() {
       const zone = (v: number) => (v < 70 ? "dark" : v < 150 ? "mid-tone" : "bright");
       const moodGuess: ThumbnailPromptInput["mood"] =
         avgLum < 90 ? "dramatic" : avgLum < 150 ? "bold" : "hopeful";
-
+      const notes =
+        `Dominant colours ${top.map((c) => `${c.hex} (${c.pct}%)`).join(", ")}; ` +
+        `brightness left ${zone(thirds[0])}, centre ${zone(thirds[1])}, right ${zone(thirds[2])}; ` +
+        `overall ${avgLum < 90 ? "dark and dramatic" : avgLum < 150 ? "balanced" : "bright and open"}.`;
+      setStyleNotes(notes);
+      setMood(moodGuess);
       setRefSummary(
-        `Dominant colours: ${top.map((c) => `${c.hex} (${c.pct}%)`).join(", ")}. ` +
-          `Brightness — left ${zone(thirds[0])} (${thirds[0]}), centre ${zone(thirds[1])} (${thirds[1]}), right ${zone(thirds[2])} (${thirds[2]}). ` +
-          `Overall the thumbnail reads as ${avgLum < 90 ? "dark and dramatic" : avgLum < 150 ? "balanced" : "bright and open"}. ` +
-          `Style to copy: ${moodGuess === "dramatic" ? "dark background, high contrast, one strong face" : moodGuess === "bold" ? "strong colours, bold contrast" : "bright, warm, open feel"}.`
+        `${notes} Style to copy: big bold text across the TOP, punch word in a solid red box, cinematic subject image left/centre, subject's face only on the right, dark background with red + blue rim light. ` +
+          `Only the style is copied — the reference image itself is never reused.`
       );
       setRefPrompt(
         buildThumbnailPrompt({
@@ -310,6 +433,7 @@ export default function ThumbnailsPage() {
           subject,
           mood: moodGuess,
           punchWords,
+          styleNotes: notes,
         })
       );
     } catch (e) {
@@ -317,7 +441,7 @@ export default function ThumbnailsPage() {
     }
   }
 
-  // ── (d) Scorer ──────────────────────────────────────────────────────
+  // ── (4) Scorer ──────────────────────────────────────────────────────
   const [scoreText, setScoreText] = useState("");
   const [scorePunch, setScorePunch] = useState("");
   const [scoreFace, setScoreFace] = useState(true);
@@ -339,31 +463,116 @@ export default function ThumbnailsPage() {
     );
   }
 
+  // ── (5) Saved compositions ──────────────────────────────────────────
+  const [saved, setSaved] = useState<SavedThumbnail[]>([]);
+  const [savedLoaded, setSavedLoaded] = useState(false);
+  const [savedMsg, setSavedMsg] = useState<string | null>(null);
+
+  useEffect(() => {
+    fetch("/api/thumbnails/saved")
+      .then(async (r) => {
+        const d = (await r.json()) as { compositions?: SavedThumbnail[]; error?: string };
+        if (r.ok) setSaved(d.compositions ?? []);
+      })
+      .catch(() => {
+        // Signed out or unavailable — saving simply stays off.
+      })
+      .finally(() => setSavedLoaded(true));
+  }, []);
+
+  async function saveComposition() {
+    setSavedMsg(null);
+    try {
+      const res = await fetch("/api/thumbnails/saved", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          composition: {
+            topic,
+            subject,
+            mood,
+            punchWords,
+            size,
+            preset,
+            topText,
+            punchWord,
+            boxColor,
+            textColor,
+            showText,
+            fontFamily,
+            styleNotes,
+          },
+        }),
+      });
+      const d = (await res.json()) as { composition?: SavedThumbnail; error?: string };
+      if (!res.ok) throw new Error(d.error ?? "Could not save composition.");
+      if (d.composition) setSaved((prev) => [d.composition as SavedThumbnail, ...prev]);
+      setSavedMsg("Composition saved — settings only; re-attach images when you reload it.");
+    } catch (e) {
+      setSavedMsg(e instanceof Error ? e.message : "Could not save composition.");
+    }
+  }
+
+  function loadComposition(c: SavedThumbnail) {
+    setTopic(c.topic);
+    setSubject(c.subject);
+    setMood(c.mood as ThumbnailPromptInput["mood"]);
+    setPunchWords(c.punchWords);
+    setSize(c.size as SizeKey);
+    setPreset(c.preset);
+    setTopText(c.topText);
+    setPunchWord(c.punchWord);
+    setBoxColor(c.boxColor);
+    setTextColor(c.textColor);
+    setShowText(c.showText);
+    setFontFamily(c.fontFamily);
+    setStyleNotes(c.styleNotes);
+    setEditorNote(`Loaded “${c.name}” — re-attach the face/background images if the original used them.`);
+    window.scrollTo({ top: 0, behavior: "smooth" });
+  }
+
+  async function deleteComposition(id: number) {
+    try {
+      const res = await fetch(`/api/thumbnails/saved?id=${id}`, { method: "DELETE" });
+      if (!res.ok) throw new Error("Could not delete it.");
+      setSaved((prev) => prev.filter((c) => c.id !== id));
+    } catch (e) {
+      setSavedMsg(e instanceof Error ? e.message : "Could not delete it.");
+    }
+  }
+
   return (
     <>
       <section className="hero">
         <div className="kicker">Thumbnail Studio</div>
         <h1>Thumbnails that get the click</h1>
         <p className="muted">
-          Build a prompt, compose a thumbnail on a real canvas, learn from a
-          reference image, or score a concept. The Nizafa style: dark navy
-          background, face on the right third, red banner at the bottom with
-          huge text and one punch word in yellow.
+          Generate a cinematic base image from a prompt, place the
+          subject&apos;s real face cutout, or match a reference
+          thumbnail&apos;s style — then add the text in the editor with real
+          fonts. Text is never baked into generated art.
         </p>
+        <div className="notice" style={{ marginTop: 12 }}>
+          <strong>House style (from your 6 examples):</strong> cinematic
+          dark background, red + blue rim light, big bold distressed white
+          text across the TOP, punch word in a solid RED box, subject imagery
+          left/centre, and the subject&apos;s face only on the right — never
+          the channel owner&apos;s face.
+        </div>
       </section>
 
-      {/* (a) Prompt builder */}
+      {/* (1) Generator form */}
       <section className="section">
         <div className="card">
-          <h2 style={{ marginBottom: 4 }}>1 · Thumbnail prompt builder</h2>
+          <h2 style={{ marginBottom: 4 }}>1 · Generator</h2>
           <p className="small muted">
-            Describe the video and get a ready-to-use image prompt. The text
-            is added afterwards in the editor with real fonts — never baked
-            into generated art.
+            Describe the video, attach the subject&apos;s face and/or a
+            reference thumbnail, and generate the base image — without any
+            text in it.
           </p>
           <div className="grid grid-2">
             <div>
-              <label className="label" htmlFor="th-topic">Video topic</label>
+              <label className="label" htmlFor="th-topic">Video topic / prompt</label>
               <input
                 id="th-topic"
                 className="input"
@@ -373,7 +582,7 @@ export default function ThumbnailsPage() {
               />
             </div>
             <div>
-              <label className="label" htmlFor="th-subject">Main subject / face</label>
+              <label className="label" htmlFor="th-subject">Main subject / face — the person the video is about</label>
               <input
                 id="th-subject"
                 className="input"
@@ -398,16 +607,58 @@ export default function ThumbnailsPage() {
               </select>
             </div>
             <div>
-              <label className="label" htmlFor="th-punch">Punch words</label>
+              <label className="label" htmlFor="th-punch">Punch words (goes in the red box)</label>
               <input
                 id="th-punch"
                 className="input"
                 value={punchWords}
                 onChange={(e) => setPunchWords(e.target.value)}
-                placeholder="e.g. GOLD RUSH"
+                placeholder="e.g. EXPOSED"
               />
             </div>
+            <div>
+              <label className="label" htmlFor="th-face-gen">Reference face photo — the subject&apos;s face only</label>
+              <input
+                id="th-face-gen"
+                className="input"
+                type="file"
+                accept="image/*"
+                onChange={(e) => onFaceUpload(e.target.files?.[0])}
+              />
+              <p className="small muted" style={{ margin: "6px 0 0" }}>
+                {faceName ? `Attached: ${faceName}. ` : ""}
+                The face in the thumbnail is ONLY the person the video is
+                about — never the channel owner&apos;s face. For the
+                cleanest cutout, upload a PNG with the background already
+                removed. Otherwise the photo fills the right third with a
+                soft-blended edge.
+              </p>
+            </div>
+            <div>
+              <label className="label" htmlFor="th-ref">Reference thumbnail (style only)</label>
+              <input
+                id="th-ref"
+                className="input"
+                type="file"
+                accept="image/*"
+                onChange={(e) => analyseReference(e.target.files?.[0])}
+              />
+              <p className="small muted" style={{ margin: "6px 0 0" }}>
+                Only the layout, colours and feel are copied — the reference
+                image itself is never reused. It is processed in your browser
+                and never uploaded.
+              </p>
+            </div>
           </div>
+          {refError ? <p className="error" style={{ marginTop: 12 }}>{refError}</p> : null}
+          {refSummary ? (
+            <div style={{ marginTop: 12 }}>
+              <p style={{ marginBottom: 4 }}>
+                <strong>{refName}</strong>
+              </p>
+              <p className="small" style={{ marginBottom: 0 }}>{refSummary}</p>
+            </div>
+          ) : null}
           {prompt ? (
             <>
               <pre className="code" style={{ marginTop: 16 }}>{prompt}</pre>
@@ -435,12 +686,19 @@ export default function ThumbnailsPage() {
               </div>
               {genNote ? <p className="notice" style={{ marginTop: 12 }}>{genNote}</p> : null}
               {genImage ? (
-                // eslint-disable-next-line @next/next/no-img-element
-                <img
-                  src={genImage}
-                  alt="AI-generated thumbnail base image (no text)"
-                  style={{ width: "100%", borderRadius: 12, marginTop: 12 }}
-                />
+                <>
+                  {/* eslint-disable-next-line @next/next/no-img-element */}
+                  <img
+                    src={genImage}
+                    alt="AI-generated thumbnail base image (no text)"
+                    style={{ width: "100%", borderRadius: 12, marginTop: 12 }}
+                  />
+                  <div style={{ marginTop: 10 }}>
+                    <button type="button" className="btn btn-primary btn-sm" onClick={useGeneratedAsBackground}>
+                      Use as editor background ↓
+                    </button>
+                  </div>
+                </>
               ) : null}
             </>
           ) : (
@@ -451,13 +709,15 @@ export default function ThumbnailsPage() {
         </div>
       </section>
 
-      {/* (b) Canvas composer */}
+      {/* (2) Editor */}
       <section className="section">
         <div className="card">
-          <h2 style={{ marginBottom: 4 }}>2 · Canvas composer</h2>
+          <h2 style={{ marginBottom: 4 }}>2 · Editor</h2>
           <p className="small muted">
-            Compose the real thumbnail and download it as a PNG. Works fully
-            offline in your browser — no upload needed.
+            Compose the real thumbnail and download it as a PNG. Big bold
+            text across the top, punch word in a solid red box, subject&apos;s
+            face on the right — all drawn with real fonts. Works fully
+            offline in your browser.
           </p>
           <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 12 }}>
             {(Object.keys(SIZES) as SizeKey[]).map((k) => (
@@ -483,6 +743,7 @@ export default function ThumbnailsPage() {
                     onClick={() => {
                       setPreset(i);
                       setBgImage(null);
+                      setBgName(null);
                     }}
                     title={`${p.from} → ${p.to}`}
                   >
@@ -512,147 +773,204 @@ export default function ThumbnailsPage() {
                 onChange={(e) => onBgUpload(e.target.files?.[0])}
               />
               {bgImage ? (
-                <button type="button" className="btn btn-ghost btn-sm" style={{ marginTop: 8 }} onClick={() => setBgImage(null)}>
-                  Remove background image
+                <button type="button" className="btn btn-ghost btn-sm" style={{ marginTop: 8 }} onClick={() => { setBgImage(null); setBgName(null); }}>
+                  Remove background image{bgName ? ` (${bgName})` : ""}
                 </button>
               ) : null}
             </div>
             <div>
-              <label className="label" htmlFor="th-face">Face cutout image (right third)</label>
+              <label className="label" htmlFor="th-top">Top text (main line)</label>
               <input
-                id="th-face"
+                id="th-top"
                 className="input"
-                type="file"
-                accept="image/*"
-                onChange={(e) => onFaceUpload(e.target.files?.[0])}
+                value={topText}
+                onChange={(e) => setTopText(e.target.value)}
+                placeholder="e.g. THE SECRET OF"
               />
-              {faceImage ? (
-                <button type="button" className="btn btn-ghost btn-sm" style={{ marginTop: 8 }} onClick={() => setFaceImage(null)}>
-                  Remove face image
-                </button>
-              ) : null}
+              <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginTop: 8 }}>
+                {TEXT_COLORS.map((c) => (
+                  <button
+                    key={c.value}
+                    type="button"
+                    className={`btn btn-sm ${textColor === c.value ? "btn-primary" : "btn-ghost"}`}
+                    onClick={() => setTextColor(c.value)}
+                    title={`Top text in ${c.name}`}
+                  >
+                    <span
+                      style={{
+                        display: "inline-block",
+                        width: 14,
+                        height: 14,
+                        borderRadius: 4,
+                        background: c.value,
+                        marginInlineEnd: 6,
+                        verticalAlign: "-2px",
+                        border: "1px solid var(--line)",
+                      }}
+                    />
+                    {c.name}
+                  </button>
+                ))}
+              </div>
             </div>
             <div>
-              <label className="label" htmlFor="th-banner">Banner text</label>
+              <label className="label" htmlFor="th-punch-word">Punch word (in the solid box)</label>
               <input
-                id="th-banner"
+                id="th-punch-word"
                 className="input"
-                value={bannerText}
-                onChange={(e) => setBannerText(e.target.value)}
-                placeholder="e.g. THEY ARE BUYING"
+                value={punchWord}
+                onChange={(e) => setPunchWord(e.target.value)}
+                placeholder="e.g. TIME"
               />
-              <label className="label" htmlFor="th-banner-punch" style={{ marginTop: 10 }}>
-                Punch word (yellow, biggest)
-              </label>
-              <input
-                id="th-banner-punch"
+              <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginTop: 8 }}>
+                {BOX_COLORS.map((c) => (
+                  <button
+                    key={c.value}
+                    type="button"
+                    className={`btn btn-sm ${boxColor === c.value ? "btn-primary" : "btn-ghost"}`}
+                    onClick={() => setBoxColor(c.value)}
+                    title={`Punch box in ${c.name}`}
+                  >
+                    <span
+                      style={{
+                        display: "inline-block",
+                        width: 14,
+                        height: 14,
+                        borderRadius: 4,
+                        background: c.value,
+                        marginInlineEnd: 6,
+                        verticalAlign: "-2px",
+                        border: "1px solid var(--line)",
+                      }}
+                    />
+                    {c.name}
+                  </button>
+                ))}
+              </div>
+            </div>
+            <div>
+              <label className="label" htmlFor="th-font">Text font (real font, not baked art)</label>
+              <select
+                id="th-font"
                 className="input"
-                value={bannerPunch}
-                onChange={(e) => setBannerPunch(e.target.value)}
-                placeholder="e.g. GOLD"
-              />
-              <label style={{ display: "flex", gap: 8, alignItems: "center", marginTop: 10, fontWeight: 600, fontSize: 14 }}>
+                value={fontFamily}
+                onChange={(e) => setFontFamily(e.target.value)}
+              >
+                {FONTS.map((f) => (
+                  <option key={f.value} value={f.value}>{f.name}</option>
+                ))}
+              </select>
+              <label style={{ display: "flex", gap: 8, alignItems: "center", fontWeight: 600, fontSize: 14, marginTop: 10 }}>
                 <input
                   type="checkbox"
-                  checked={showBanner}
-                  onChange={(e) => setShowBanner(e.target.checked)}
+                  checked={showText}
+                  onChange={(e) => setShowText(e.target.checked)}
                 />
-                Show red banner
+                Show top text
               </label>
+            </div>
+            <div>
+              <span className="label">Face cutout</span>
+              <p className="small muted" style={{ margin: "0 0 8px" }}>
+                {faceName ? `Attached: ${faceName}. ` : "No face attached yet. "}
+                Upload the subject&apos;s photo in step 1 — it appears on the
+                right third with a blended edge and red + blue rim light.
+              </p>
+              {faceImage ? (
+                <button type="button" className="btn btn-ghost btn-sm" onClick={() => { setFaceImage(null); setFaceName(null); }}>
+                  Remove face
+                </button>
+              ) : null}
             </div>
           </div>
           {composerError ? <p className="error">{composerError}</p> : null}
+          {editorNote ? <p className="small" style={{ marginBottom: 8 }}>{editorNote}</p> : null}
           <canvas
             ref={canvasRef}
-            style={{ width: "100%", height: "auto", borderRadius: 12, display: "block", background: "#06101f" }}
+            style={{ width: "100%", height: "auto", borderRadius: 12, display: "block", background: "#14181d" }}
           />
-          <div style={{ marginTop: 12 }}>
+          <div style={{ marginTop: 12, display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
             <button type="button" className="btn btn-primary" onClick={downloadPng}>
               Download PNG
             </button>
-            <span className="small muted" style={{ marginInlineStart: 12 }}>
+            <button type="button" className="btn btn-ghost" onClick={saveComposition}>
+              Save composition
+            </button>
+            <span className="small muted">
               {SIZES[size].w}×{SIZES[size].h} · PNG
             </span>
           </div>
-        </div>
-      </section>
+          {savedMsg ? <p className="small" style={{ marginTop: 10 }}>{savedMsg}</p> : null}
 
-      {/* (c) Reference analysis */}
-      <section className="section">
-        <div className="card">
-          <h2 style={{ marginBottom: 4 }}>3 · Reference analysis</h2>
-          <p className="small muted">
-            Upload a thumbnail you like. Nizafa reads its colours and layout
-            and writes you a fresh prompt in that style.{" "}
-            <strong>
-              The image is processed only in your browser — it is never
-              uploaded, stored, or sent anywhere.
-            </strong>
-          </p>
-          <label className="label" htmlFor="th-ref">Reference thumbnail</label>
-          <input
-            id="th-ref"
-            className="input"
-            type="file"
-            accept="image/*"
-            onChange={(e) => analyseReference(e.target.files?.[0])}
-          />
-          {refError ? <p className="error" style={{ marginTop: 12 }}>{refError}</p> : null}
-          {refSummary ? (
-            <>
-              <p style={{ marginTop: 12, marginBottom: 4 }}>
-                <strong>{refName}</strong>
+          {savedLoaded && saved.length > 0 ? (
+            <div style={{ marginTop: 18 }}>
+              <h3 style={{ marginBottom: 8 }}>Saved compositions</h3>
+              <p className="small muted">
+                Settings only — images are never stored, so re-attach the face
+                and background images when you reload one.
               </p>
-              <p className="small">{refSummary}</p>
-              {refPrompt ? (
-                <>
-                  <pre className="code">{refPrompt}</pre>
-                  <CopyButton text={refPrompt} label="Copy this style's prompt" />
-                </>
-              ) : null}
-            </>
+              <div style={{ display: "grid", gap: 8 }}>
+                {saved.map((c) => (
+                  <div key={c.id} className="list-row" style={{ padding: "10px 0" }}>
+                    <div style={{ minWidth: 0, flex: 1 }}>
+                      <strong>{c.name}</strong>
+                      <div className="small muted">
+                        {c.size} · {c.topText || c.topic || "No text yet"} ·{" "}
+                        {c.createdAt ? new Date(c.createdAt).toLocaleDateString() : ""}
+                      </div>
+                    </div>
+                    <button type="button" className="btn btn-ghost btn-sm" onClick={() => loadComposition(c)}>
+                      Load
+                    </button>
+                    <button type="button" className="btn btn-ghost btn-sm" onClick={() => deleteComposition(c.id)}>
+                      Delete
+                    </button>
+                  </div>
+                ))}
+              </div>
+            </div>
           ) : null}
         </div>
       </section>
 
-      {/* (d) Scorer */}
+      {/* (3) Scorer */}
       <section className="section">
         <div className="card">
-          <h2 style={{ marginBottom: 4 }}>4 · Thumbnail scorer</h2>
+          <h2 style={{ marginBottom: 4 }}>3 · Thumbnail scorer</h2>
           <p className="small muted">
-            A rule-based checklist score — an{" "}
+            A rule-based checklist score against the house style — an{" "}
             <strong>editorial estimate</strong>, not a prediction of clicks.
           </p>
           <div className="grid grid-2">
             <div>
-              <label className="label" htmlFor="th-score-text">Banner text</label>
+              <label className="label" htmlFor="th-score-text">Top text</label>
               <input
                 id="th-score-text"
                 className="input"
                 value={scoreText}
                 onChange={(e) => setScoreText(e.target.value)}
-                placeholder="e.g. THEY ARE BUYING GOLD"
+                placeholder="e.g. THE SECRET OF"
               />
             </div>
             <div>
-              <label className="label" htmlFor="th-score-punch">Punch word</label>
+              <label className="label" htmlFor="th-score-punch">Punch word (in the red box)</label>
               <input
                 id="th-score-punch"
                 className="input"
                 value={scorePunch}
                 onChange={(e) => setScorePunch(e.target.value)}
-                placeholder="e.g. GOLD"
+                placeholder="e.g. TIME"
               />
             </div>
           </div>
           <div style={{ display: "flex", gap: 16, flexWrap: "wrap", marginTop: 12 }}>
             <label style={{ display: "flex", gap: 8, alignItems: "center", fontWeight: 600, fontSize: 14 }}>
               <input type="checkbox" checked={scoreFace} onChange={(e) => setScoreFace(e.target.checked)} />
-              Face on the right third
+              Subject&apos;s face only (right third)
             </label>
             <label style={{ display: "flex", gap: 8, alignItems: "center", fontWeight: 600, fontSize: 14 }}>
               <input type="checkbox" checked={scoreDark} onChange={(e) => setScoreDark(e.target.checked)} />
-              Dark background
+              Dark, cinematic background
             </label>
             <label style={{ display: "flex", gap: 8, alignItems: "center", fontWeight: 600, fontSize: 14 }}>
               <input type="checkbox" checked={scoreContrast} onChange={(e) => setScoreContrast(e.target.checked)} />

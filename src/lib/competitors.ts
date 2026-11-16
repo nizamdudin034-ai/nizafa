@@ -10,6 +10,7 @@ import {
   fetchLatestVideos,
   parseChannelInput,
 } from "./youtube";
+import { recordChannelSnapshot } from "./channel-snapshots";
 
 const STALE_MS = 6 * 60 * 60 * 1000;
 
@@ -38,6 +39,13 @@ export async function connectCompetitorChannel(
         return { error: "That channel is already connected as your own channel." };
       }
       if (Date.now() - new Date(cached.updated_at as string).getTime() < STALE_MS) {
+        // Anchor the growth history with the stored stats (dedupe in the
+        // snapshot lib skips it when nothing changed).
+        await recordChannelSnapshot(admin, cached.id as number, {
+          subscriberCount: cached.subscriber_count as number | null,
+          viewCount: cached.view_count as number | null,
+          videoCount: cached.video_count as number | null,
+        });
         return { channel: cached as Record<string, unknown>, cached: true };
       }
     }
@@ -77,6 +85,13 @@ export async function connectCompetitorChannel(
     if (error || !saved) {
       return { error: error?.message ?? "Could not save competitor." };
     }
+    // Growth history starts here: the first snapshot is the baseline for
+    // future 7/30/90-day growth. Never throws (missing table = no history).
+    await recordChannelSnapshot(admin, saved.id as number, {
+      subscriberCount: channel.subscriberCount,
+      viewCount: channel.viewCount,
+      videoCount: channel.videoCount,
+    });
     if (channel.uploadsPlaylistId) {
       const latest = await fetchLatestVideos(channel.uploadsPlaylistId, 10);
       if (latest.length > 0) {

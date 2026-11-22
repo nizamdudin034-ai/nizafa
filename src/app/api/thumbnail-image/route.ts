@@ -2,9 +2,12 @@ import { NextResponse } from "next/server";
 import { getSessionUser } from "@/lib/auth";
 
 // AI thumbnail image generation.
-// If REPLICATE_API_TOKEN is set, Replicate is tried first; otherwise
-// OPENAI_API_KEY is used. If neither is configured the route answers
-// honestly with { status: "unavailable" } — it NEVER fakes an image.
+// Provider order: Replicate (if configured) → OpenAI (if configured) →
+// Pollinations (free, no key). A configured provider that fails — e.g. an
+// invalid/expired key returning 401 — falls through to the next provider
+// instead of surfacing the raw provider error, so image generation keeps
+// working even with a bad key saved. If every provider fails the route
+// answers honestly with { status: "error" } — it NEVER fakes an image.
 // No key is ever sent to the browser or logged.
 
 export const maxDuration = 120;
@@ -15,6 +18,12 @@ const OPENAI_SIZE: Record<SizeKey, string> = {
   "16:9": "1792x1024",
   "9:16": "1024x1792",
   "1:1": "1024x1024",
+};
+
+const POLLINATIONS_SIZE: Record<SizeKey, { width: number; height: number }> = {
+  "16:9": { width: 1280, height: 720 },
+  "9:16": { width: 720, height: 1280 },
+  "1:1": { width: 1024, height: 1024 },
 };
 
 async function generateWithReplicate(
@@ -105,6 +114,32 @@ async function generateWithOpenAI(
   }
 }
 
+async function generateWithPollinations(
+  prompt: string,
+  size: SizeKey
+): Promise<{ imageUrl: string } | { error: string }> {
+  // Free tier, no key, no account. Used as the last resort so the
+  // "Generate image (AI)" button works even with no (or a bad) paid key.
+  try {
+    const { width, height } = POLLINATIONS_SIZE[size];
+    const seed = Math.floor(Math.random() * 1_000_000_000);
+    const url =
+      `https://image.pollinations.ai/prompt/${encodeURIComponent(prompt)}` +
+      `?width=${width}&height=${height}&model=flux&nologo=true&seed=${seed}`;
+    const check = await fetch(url, { method: "GET" });
+    if (!check.ok) {
+      return { error: `Pollinations ${check.status}: image request failed.` };
+    }
+    const type = check.headers.get("content-type") ?? "";
+    if (!type.startsWith("image/")) {
+      return { error: "Pollinations returned a non-image response." };
+    }
+    return { imageUrl: url };
+  } catch (e) {
+    return { error: e instanceof Error ? e.message : "Pollinations request failed." };
+  }
+}
+
 export async function POST(req: Request) {
   const user = await getSessionUser();
   if (!user) {
@@ -123,27 +158,33 @@ export async function POST(req: Request) {
 
   const hasReplicate = Boolean(process.env.REPLICATE_API_TOKEN);
   const hasOpenAI = Boolean(process.env.OPENAI_API_KEY);
-  if (!hasReplicate && !hasOpenAI) {
-    return NextResponse.json({
-      status: "unavailable",
-      reason:
-        "No image-generation key configured — use the canvas composer on the Thumbnail Studio page instead.",
-    });
-  }
 
+  // Try each configured provider in order; any failure (including a 401
+  // from an invalid saved key) falls through to the next one.
   if (hasReplicate) {
     const result = await generateWithReplicate(prompt, size);
     if ("imageUrl" in result) {
       return NextResponse.json({ status: "ok", provider: "replicate", imageUrl: result.imageUrl });
     }
-    // Replicate failed — fall back to OpenAI if available, else report it.
-    if (!hasOpenAI) {
-      return NextResponse.json({ status: "error", reason: result.error }, { status: 502 });
+  }
+  if (hasOpenAI) {
+    const openAi = await generateWithOpenAI(prompt, size);
+    if ("imageUrl" in openAi) {
+      return NextResponse.json({ status: "ok", provider: "openai", imageUrl: openAi.imageUrl });
     }
   }
-  const openAi = await generateWithOpenAI(prompt, size);
-  if ("imageUrl" in openAi) {
-    return NextResponse.json({ status: "ok", provider: "openai", imageUrl: openAi.imageUrl });
+  // Free fallback — no key needed, so generation works even with no keys
+  // configured or with an invalid saved key.
+  const free = await generateWithPollinations(prompt, size);
+  if ("imageUrl" in free) {
+    return NextResponse.json({ status: "ok", provider: "pollinations", imageUrl: free.imageUrl });
   }
-  return NextResponse.json({ status: "error", reason: openAi.error }, { status: 502 });
+  return NextResponse.json(
+    {
+      status: "error",
+      reason:
+        "All image providers failed — use the canvas composer on the Thumbnail Studio page instead.",
+    },
+    { status: 502 }
+  );
 }

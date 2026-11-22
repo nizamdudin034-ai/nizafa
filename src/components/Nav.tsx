@@ -8,6 +8,7 @@ import { getSavedLang, setSavedLang, t, type Lang } from "@/lib/i18n";
 
 const LINKS = [
   { href: "/", key: "home" },
+  { href: "/ai", key: "ai" },
   { href: "/generate", key: "generate" },
   { href: "/create", key: "create" },
   { href: "/research", key: "research" },
@@ -21,6 +22,7 @@ const LINKS = [
 
 const BOTTOM_LINKS = [
   { href: "/", key: "home", icon: "⌂" },
+  { href: "/ai", key: "ai", icon: "✦" },
   { href: "/optimize", key: "optimize", icon: "↗" },
   { href: "/research", key: "research", icon: "⌕" },
   { href: "/thumbnails", key: "thumbnails", icon: "▣" },

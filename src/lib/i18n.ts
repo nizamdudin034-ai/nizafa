@@ -5,6 +5,7 @@ export type Lang = "en" | "ur";
 
 export const STRINGS: Record<string, { en: string; ur: string }> = {
   home: { en: "Home", ur: "ہوم" },
+  ai: { en: "Nizafa.ai", ur: "Nizafa.ai" },
   generate: { en: "Generate", ur: "بنائیں" },
   research: { en: "Research", ur: "ریسرچ" },
   optimize: { en: "Optimize", ur: "بہتر بنائیں" },

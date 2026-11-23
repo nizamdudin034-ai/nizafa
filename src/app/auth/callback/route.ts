@@ -10,10 +10,25 @@ import { createSupabaseServer } from "@/lib/supabase-server";
 // the user onto the deploy URL, where the session cookie (set for the
 // public host) does not apply and the user looks signed out. Use the
 // original public host from the forwarded headers instead.
+function getCookie(header: string | null, name: string): string | null {
+  if (!header) return null;
+  for (const part of header.split(";")) {
+    const [k, ...v] = part.trim().split("=");
+    if (k === name) return decodeURIComponent(v.join("="));
+  }
+  return null;
+}
+
 export async function GET(req: Request) {
   const url = new URL(req.url);
   const code = url.searchParams.get("code");
-  const rawNext = url.searchParams.get("next") ?? "/";
+  // Return destination: ?next= param first, then the nizafa-next cookie
+  // set by the chatbot sign-in screen (the redirectTo URL itself must
+  // stay exactly matching Supabase's allowlist, so it carries no query).
+  const rawNext =
+    url.searchParams.get("next") ??
+    getCookie(req.headers.get("cookie"), "nizafa-next") ??
+    "/";
   const next =
     rawNext.startsWith("/") && !rawNext.startsWith("//") ? rawNext : "/";
   if (code) {
@@ -28,5 +43,8 @@ export async function GET(req: Request) {
   const origin = forwardedHost
     ? `${forwardedProto}://${forwardedHost}`
     : (process.env.NEXT_PUBLIC_APP_URL ?? url.origin);
-  return NextResponse.redirect(new URL(next, origin));
+  const res = NextResponse.redirect(new URL(next, origin));
+  // One-time cookie: clear it so a later sign-in starts fresh.
+  res.cookies.set("nizafa-next", "", { maxAge: 0, path: "/" });
+  return res;
 }

@@ -35,6 +35,15 @@ export function middleware(request: NextRequest) {
   }
 
   if (host === AI_HOST) {
+    // Safety net: if Supabase ever sends an OAuth code to the chatbot
+    // homepage instead of /auth/callback, forward it there instead of
+    // stranding the user on a page that cannot use the code.
+    if (pathname === "/" && request.nextUrl.searchParams.has("code")) {
+      const cb = new URL("/auth/callback", AI_SITE);
+      cb.search = request.nextUrl.search;
+      cb.searchParams.set("next", "/ai/chat");
+      return NextResponse.redirect(cb, 308);
+    }
     // Chatbot site homepage opens the chatbot.
     if (pathname === "/") {
       return NextResponse.redirect(new URL("/ai", AI_SITE), 308);

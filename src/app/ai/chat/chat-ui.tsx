@@ -26,10 +26,19 @@ export function AiSignIn() {
     setBusy(true);
     try {
       const supabase = createSupabaseBrowser();
+      // Remember where to return after sign-in (read by /auth/callback).
+      document.cookie =
+        "nizafa-next=/ai/chat; path=/; max-age=600; SameSite=Lax";
       const { error } = await supabase.auth.signInWithOAuth({
         provider: "google",
         options: {
-          redirectTo: `${window.location.origin}/auth/callback?next=/ai/chat`,
+          // NOTE: redirectTo must EXACTLY match an allowed URL in Supabase
+          // Auth settings (https://nizafa-ai.netlify.app/auth/callback).
+          // An extra ?next= query param makes Supabase reject it and fall
+          // back to the Site URL (the SEO site) with ?code= — the user
+          // lands on the wrong site, signed out. The return destination
+          // travels in the nizafa-next cookie instead.
+          redirectTo: `${window.location.origin}/auth/callback`,
           scopes: "openid email profile",
         },
       });

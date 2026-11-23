@@ -1,6 +1,7 @@
 import type { Metadata, Viewport } from "next";
 import "./globals.css";
 import Nav from "@/components/Nav";
+import SiteFooter from "@/components/SiteFooter";
 import ThemeScript from "@/components/ThemeScript";
 import PwaRegister from "@/components/PwaRegister";
 
@@ -32,12 +33,7 @@ export default function RootLayout({
         <PwaRegister />
         <Nav />
         <main className="container">{children}</main>
-        <footer className="container footer">
-          <strong>Nizafa</strong> — YouTube SEO &amp; Growth Tool. Built
-          from live public data and the YouTube Data API.{" "}
-          <a href="/privacy">Privacy Policy</a> ·{" "}
-          <a href="/terms">Terms</a>
-        </footer>
+        <SiteFooter />
       </body>
     </html>
   );

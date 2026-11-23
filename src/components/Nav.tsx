@@ -35,8 +35,12 @@ export default function Nav() {
   const [lang, setLang] = useState<Lang>("en");
   const [email, setEmail] = useState<string | null>(null);
   const [ready, setReady] = useState(false);
+  // On the standalone chatbot site (nizafa-ai.netlify.app) there is no SEO
+  // navigation at all — the site is only the chatbot.
+  const [isAiHost, setIsAiHost] = useState(false);
 
   useEffect(() => {
+    setIsAiHost(window.location.hostname === "nizafa-ai.netlify.app");
     setTheme(
       document.documentElement.getAttribute("data-theme") === "dark"
         ? "dark"
@@ -102,6 +106,8 @@ export default function Nav() {
       router.refresh();
     }
   }
+
+  if (isAiHost) return null;
 
   return (
     <>

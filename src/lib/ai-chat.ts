@@ -98,6 +98,106 @@ export function imageUrl(prompt: string, width = 1024, height = 1024): string {
   )}?width=${width}&height=${height}&nologo=true&seed=${seed}`;
 }
 
+// ── Image-generation intent (typed requests, no mode button needed) ────────
+// "Draw a picture" lives in Plugins → Chat tools, but most people just type
+// "make me a picture". When the message asks to CREATE an image (creation
+// verb + image noun, Urdu/English/Roman Urdu) and no photo is attached,
+// treat it as image mode.
+const IMAGE_VERBS =
+  /\b(make|draw|generate|create|design|paint|sketch|render|banao|bana|banado|banakar)\b|بناؤ|بنائیں|بنا دو|بنا کر|ڈیزائن/i;
+const IMAGE_NOUNS =
+  /\b(picture|image|photo|logo|poster|wallpaper|thumbnail|art|pic|tasveer|tasweer)\b|تصویر|لوگو|پوسٹر/i;
+
+export function wantsImage(message: string): boolean {
+  return IMAGE_VERBS.test(message) && IMAGE_NOUNS.test(message);
+}
+
+// ── Pollinations image generation, verified before replying ───────────────
+// The free image API rate-limits (503 "Classic API is at its limit — retry
+// after 10s"), so the server checks the picture actually loads (up to 2
+// tries) instead of sending the user a broken image link.
+export async function verifiedImageUrl(prompt: string): Promise<string | null> {
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    const url = imageUrl(prompt);
+    try {
+      const res = await fetch(url, { signal: AbortSignal.timeout(20_000) });
+      const type = res.headers.get("content-type") ?? "";
+      if (res.ok && type.startsWith("image/")) return url;
+    } catch {
+      // fall through to retry
+    }
+    if (attempt === 1) await new Promise((r) => setTimeout(r, 6000));
+  }
+  return null;
+}
+
+// ── Google Gemini (free API key) — the only vision model we have ──────────
+// The free Pollinations text model cannot read images at all (400 "model
+// does not support image input"). Gemini Flash reads photos; the key lives
+// in GEMINI_API_KEY on Netlify. Verified 23 Nov 2026: gemini-2.5-flash is
+// retired for new keys (404); gemini-3.8-flash 503s under high demand;
+// gemini-3.5-flash works — so try it first, then the others. Returns null
+// when the key is missing or every call fails, so the caller can answer
+// honestly instead.
+// NOTE: Gemini IMAGE generation is NOT free for this key — the image models
+// return 429 "quota exceeded, limit: 0" on the free tier. Pictures stay on
+// Pollinations (verifiedImageUrl); do not route image mode through Gemini.
+const GEMINI_VISION_MODELS = [
+  "gemini-3.5-flash",
+  "gemini-3.8-flash",
+  "gemini-3.7-flash",
+];
+
+export async function describeImageWithGemini(
+  imageDataUrl: string,
+  question: string,
+  lang: AiLang
+): Promise<string | null> {
+  const key = process.env.GEMINI_API_KEY;
+  if (!key) return null;
+  const m = imageDataUrl.match(/^data:([^;]+);base64,(.+)$/);
+  if (!m) return null;
+  const [, mimeType, data] = m;
+  const body = JSON.stringify({
+    contents: [
+      {
+        parts: [
+          { inlineData: { mimeType, data } },
+          {
+            text: `Look at this photo carefully and answer the user's question about it. Reply in the SAME language the user wrote in: ${LANG_NAMES[lang]}. Be specific about what is actually visible in the photo. If something is not clear in the photo, say so honestly instead of guessing.\n\nUser's question: ${question || "What is in this photo?"}`,
+          },
+        ],
+      },
+    ],
+    generationConfig: { maxOutputTokens: 900, temperature: 0.7 },
+  });
+  for (const model of GEMINI_VISION_MODELS) {
+    try {
+      const res = await fetch(
+        `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`,
+        {
+          method: "POST",
+          headers: { "x-goog-api-key": key, "Content-Type": "application/json" },
+          body,
+          signal: AbortSignal.timeout(45_000),
+        }
+      );
+      if (!res.ok) continue;
+      const json = (await res.json().catch(() => null)) as {
+        candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }>;
+      } | null;
+      const text = json?.candidates?.[0]?.content?.parts
+        ?.map((p) => p.text ?? "")
+        .join("")
+        .trim();
+      if (text) return text;
+    } catch {
+      // try the next model
+    }
+  }
+  return null;
+}
+
 // ── Live web research (all free, no key) ───────────────────────────────────
 
 export type WebResult = { title: string; url: string; snippet: string };

@@ -4,10 +4,12 @@ import { getSessionUser } from "@/lib/auth";
 import {
   AI_DAILY_LIMIT,
   countTodayUsage,
+  describeImageWithGemini,
   detectChatLang,
-  imageUrl,
   streamChatCompletion,
   systemPrompt,
+  verifiedImageUrl,
+  wantsImage,
   webSearch,
   type AiMode,
   type ChatMsg,
@@ -49,7 +51,7 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: "Bad request." }, { status: 400 });
   }
   const message = (body.message ?? "").trim();
-  const mode: AiMode =
+  let mode: AiMode =
     body.mode === "image" || body.mode === "research" || body.mode === "deep"
       ? body.mode
       : "chat";
@@ -58,6 +60,11 @@ export async function POST(req: Request) {
   }
   if (message.length > 8000) {
     return NextResponse.json({ error: "Message is too long." }, { status: 400 });
+  }
+  // Typed picture requests ("make me a picture", "تصویر بناؤ") count as
+  // image mode even when the user never opened the Draw-a-picture tool.
+  if (mode === "chat" && !body.imageDataUrl && wantsImage(message)) {
+    mode = "image";
   }
 
   // Pre-flight reads run in parallel (one batch): the user row, today's
@@ -145,15 +152,20 @@ export async function POST(req: Request) {
         controller.enqueue(encoder.encode(`data: ${JSON.stringify(obj)}\n\n`));
       };
       try {
-        // ── Photo attached: the free text model has no vision (it rejects
-        // image input with a 400), so answer honestly instead of letting
-        // the request fail. Photo reading needs a vision model, which the
-        // free tier does not offer. ──
+        // ── Photo attached: read it with Gemini vision (the free text
+        // model cannot see photos at all). If Gemini is not set up or the
+        // call fails, answer honestly instead of failing silently. ──
         if (body.imageDataUrl) {
+          const answer = await describeImageWithGemini(
+            body.imageDataUrl,
+            message,
+            lang
+          );
           const text =
-            lang === "ur"
+            answer ??
+            (lang === "ur"
               ? "اس ویب سائٹ پر ابھی تصویر پڑھنا ممکن نہیں ہے — تصویر کی تفصیل الفاظ میں لکھ دیں، میں جواب دوں گا۔"
-              : "I can't read photos on this website yet — please describe the photo in words and I'll answer.";
+              : "I can't read photos on this website yet — please describe the photo in words and I'll answer.");
           send({ delta: text });
           await supabase
             .from("chat_messages")
@@ -163,10 +175,25 @@ export async function POST(req: Request) {
           return;
         }
 
-        // ── Image mode: no LLM call, just a generated picture. ──
+        // ── Image mode: no LLM call, just a generated picture. The picture
+        // is verified to actually load first (the free image API
+        // rate-limits with 503s); if it won't load, say so honestly. ──
         if (mode === "image") {
           const prompt = message || "a beautiful picture";
-          const url = imageUrl(prompt);
+          const url = await verifiedImageUrl(prompt);
+          if (!url) {
+            const text =
+              lang === "ur"
+                ? "تصویر بنانے والی سروس ابھی مصروف ہے — چند لمحے بعد دوبارہ کوشش کریں۔"
+                : "The picture service is busy right now — please try again in a few moments.";
+            send({ delta: text });
+            await supabase
+              .from("chat_messages")
+              .insert({ conversation_id: conversationId, role: "assistant", content: text });
+            send({ done: true, conversationId, remaining: remainingAfter });
+            controller.close();
+            return;
+          }
           const text = `![${prompt.replace(/\]/g, "")}](${url})\n\nHere is your picture — ${prompt}.`;
           send({ delta: text });
           await supabase

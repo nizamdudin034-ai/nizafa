@@ -60,12 +60,27 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: "Message is too long." }, { status: 400 });
   }
 
-  // Make sure the user has an app_users row (own-row RLS allows this).
-  const { data: existing } = await supabase
-    .from("app_users")
-    .select("id")
-    .eq("id", user.id)
-    .maybeSingle();
+  // Pre-flight reads run in parallel (one batch): the user row, today's
+  // usage count, and — when the client sent one — the conversation
+  // ownership check. Sequential round-trips here were pushing slow replies
+  // past the platform's ~30 s function cap (504/502 on 23 Nov).
+  const [existingRes, used, convRes] = await Promise.all([
+    supabase
+      .from("app_users")
+      .select("id")
+      .eq("id", user.id)
+      .maybeSingle(),
+    countTodayUsage(supabase, user.id),
+    body.conversationId
+      ? supabase
+          .from("chat_conversations")
+          .select("id")
+          .eq("id", body.conversationId)
+          .eq("user_id", user.id)
+          .maybeSingle()
+      : Promise.resolve({ data: null as { id: number } | null }),
+  ]);
+  const existing = existingRes.data;
   if (!existing) {
     await supabase.from("app_users").insert({
       id: user.id,
@@ -76,7 +91,6 @@ export async function POST(req: Request) {
   }
 
   // Free plan: 50 user messages per day.
-  const used = await countTodayUsage(supabase, user.id);
   if (used >= AI_DAILY_LIMIT) {
     return NextResponse.json(
       {
@@ -92,13 +106,7 @@ export async function POST(req: Request) {
   // Conversation: verify ownership, or create one.
   let conversationId = body.conversationId;
   if (conversationId) {
-    const { data: conv } = await supabase
-      .from("chat_conversations")
-      .select("id")
-      .eq("id", conversationId)
-      .eq("user_id", user.id)
-      .maybeSingle();
-    if (!conv) {
+    if (!convRes.data) {
       return NextResponse.json({ error: "Chat not found." }, { status: 404 });
     }
   } else {
@@ -114,14 +122,16 @@ export async function POST(req: Request) {
     conversationId = conv.id as number;
   }
 
-  await supabase
-    .from("chat_conversations")
-    .update({ updated_at: new Date().toISOString() })
-    .eq("id", conversationId);
   const savedContent = message || "(image)";
-  const { error: msgErr } = await supabase
-    .from("chat_messages")
-    .insert({ conversation_id: conversationId, role: "user", content: savedContent });
+  const [{ error: msgErr }] = await Promise.all([
+    supabase
+      .from("chat_messages")
+      .insert({ conversation_id: conversationId, role: "user", content: savedContent }),
+    supabase
+      .from("chat_conversations")
+      .update({ updated_at: new Date().toISOString() })
+      .eq("id", conversationId),
+  ]);
   if (msgErr) {
     return NextResponse.json({ error: "Could not save the message." }, { status: 500 });
   }
@@ -135,6 +145,24 @@ export async function POST(req: Request) {
         controller.enqueue(encoder.encode(`data: ${JSON.stringify(obj)}\n\n`));
       };
       try {
+        // ── Photo attached: the free text model has no vision (it rejects
+        // image input with a 400), so answer honestly instead of letting
+        // the request fail. Photo reading needs a vision model, which the
+        // free tier does not offer. ──
+        if (body.imageDataUrl) {
+          const text =
+            lang === "ur"
+              ? "اس ویب سائٹ پر ابھی تصویر پڑھنا ممکن نہیں ہے — تصویر کی تفصیل الفاظ میں لکھ دیں، میں جواب دوں گا۔"
+              : "I can't read photos on this website yet — please describe the photo in words and I'll answer.";
+          send({ delta: text });
+          await supabase
+            .from("chat_messages")
+            .insert({ conversation_id: conversationId, role: "assistant", content: text });
+          send({ done: true, conversationId, remaining: remainingAfter });
+          controller.close();
+          return;
+        }
+
         // ── Image mode: no LLM call, just a generated picture. ──
         if (mode === "image") {
           const prompt = message || "a beautiful picture";

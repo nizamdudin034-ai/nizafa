@@ -348,98 +348,119 @@ export default function ChatUI({ email }: { email: string | undefined }) {
       { role: "user", content: userText },
       { role: "assistant", content: "" },
     ]);
-    try {
-      const res = await fetch("/api/ai/chat", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          conversationId: activeId ?? undefined,
-          message: text,
-          mode: currentMode,
-          imageDataUrl: currentAttach?.kind === "image" ? currentAttach.dataUrl : undefined,
-          fileText: currentAttach?.kind === "file" ? currentAttach.text : undefined,
-          fileName: currentAttach?.name,
-        }),
-      });
-      if (!res.ok) {
-        const data = (await res.json().catch(() => ({}))) as { error?: string };
+    // The reply endpoint is occasionally slow (free AI service + platform
+    // limits) — retry once automatically when nothing came back at all.
+    let lastError: string | null = null;
+    let noRetry = false;
+    let succeeded = false;
+    for (let attempt = 1; attempt <= 2 && !succeeded; attempt++) {
+      if (attempt > 1) {
+        await new Promise((r) => setTimeout(r, 1500));
         setMessages((m) => {
           const copy = [...m];
-          copy[copy.length - 1] = {
-            role: "assistant",
-            content: data.error ?? "Something went wrong. Please try again.",
-          };
+          copy[copy.length - 1] = { role: "assistant", content: "" };
           return copy;
         });
-        if (res.status === 401) window.location.reload();
-        return;
       }
-      const reader = res.body?.getReader();
-      if (!reader) throw new Error("No stream");
-      const decoder = new TextDecoder();
-      let buf = "";
-      let full = "";
-      let doneId: number | null = null;
-      for (;;) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        buf += decoder.decode(value, { stream: true });
-        const parts = buf.split("\n\n");
-        buf = parts.pop() ?? "";
-        for (const part of parts) {
-          for (const line of part.split("\n")) {
-            const t = line.trim();
-            if (!t.startsWith("data:")) continue;
-            try {
-              const evt = JSON.parse(t.slice(5).trim()) as {
-                delta?: string;
-                done?: boolean;
-                conversationId?: number;
-                remaining?: number;
-                error?: string;
-              };
-              if (typeof evt.delta === "string") {
-                full += evt.delta;
-                setMessages((m) => {
-                  const copy = [...m];
-                  copy[copy.length - 1] = { role: "assistant", content: full };
-                  return copy;
-                });
+      try {
+        const res = await fetch("/api/ai/chat", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            conversationId: activeId ?? undefined,
+            message: text,
+            mode: currentMode,
+            imageDataUrl: currentAttach?.kind === "image" ? currentAttach.dataUrl : undefined,
+            fileText: currentAttach?.kind === "file" ? currentAttach.text : undefined,
+            fileName: currentAttach?.name,
+          }),
+        });
+        if (!res.ok) {
+          const data = (await res.json().catch(() => ({}))) as { error?: string };
+          lastError = data.error ?? "Something went wrong. Please try again.";
+          if (res.status === 400 || res.status === 429) noRetry = true;
+          if (res.status === 401) window.location.reload();
+          throw new Error(lastError);
+        }
+        const reader = res.body?.getReader();
+        if (!reader) throw new Error("No stream");
+        const decoder = new TextDecoder();
+        let buf = "";
+        let full = "";
+        let doneId: number | null = null;
+        let streamFailed = false;
+        for (;;) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          buf += decoder.decode(value, { stream: true });
+          const parts = buf.split("\n\n");
+          buf = parts.pop() ?? "";
+          for (const part of parts) {
+            for (const line of part.split("\n")) {
+              const t = line.trim();
+              if (!t.startsWith("data:")) continue;
+              try {
+                const evt = JSON.parse(t.slice(5).trim()) as {
+                  delta?: string;
+                  done?: boolean;
+                  conversationId?: number;
+                  remaining?: number;
+                  error?: string;
+                };
+                if (typeof evt.delta === "string") {
+                  full += evt.delta;
+                  setMessages((m) => {
+                    const copy = [...m];
+                    copy[copy.length - 1] = { role: "assistant", content: full };
+                    return copy;
+                  });
+                }
+                if (evt.error) {
+                  lastError = evt.error;
+                  if (!full.trim()) streamFailed = true;
+                  else {
+                    setMessages((m) => {
+                      const copy = [...m];
+                      copy[copy.length - 1] = { role: "assistant", content: evt.error as string };
+                      return copy;
+                    });
+                  }
+                }
+                if (evt.done) {
+                  doneId = evt.conversationId ?? null;
+                  if (typeof evt.remaining === "number") setRemaining(evt.remaining);
+                }
+              } catch {
+                // ignore partial JSON
               }
-              if (evt.error) {
-                setMessages((m) => {
-                  const copy = [...m];
-                  copy[copy.length - 1] = { role: "assistant", content: evt.error as string };
-                  return copy;
-                });
-              }
-              if (evt.done) {
-                doneId = evt.conversationId ?? null;
-                if (typeof evt.remaining === "number") setRemaining(evt.remaining);
-              }
-            } catch {
-              // ignore partial JSON
             }
           }
+          if (streamFailed) break;
         }
+        if (streamFailed) throw new Error(lastError ?? "Stream failed");
+        if (doneId) {
+          setActiveId(doneId);
+          loadConvs();
+        }
+        if (callOnRef.current && full.trim()) speak(full);
+        succeeded = true;
+      } catch {
+        if (attempt >= 2 || noRetry) {
+          setMessages((m) => {
+            const copy = [...m];
+            copy[copy.length - 1] = {
+              role: "assistant",
+              content:
+                lastError ??
+                "The reply could not finish. Please check your connection and try again.",
+            };
+            return copy;
+          });
+        }
+        // otherwise the loop retries once automatically
       }
-      if (doneId) {
-        setActiveId(doneId);
-        loadConvs();
-      }
-      if (callOnRef.current && full.trim()) speak(full);
-    } catch {
-      setMessages((m) => {
-        const copy = [...m];
-        copy[copy.length - 1] = {
-          role: "assistant",
-          content: "The reply could not finish. Please check your connection and try again.",
-        };
-        return copy;
-      });
-    } finally {
-      setSending(false);
     }
+    setSending(false);
   }
 
   const sendRef = useRef(send);

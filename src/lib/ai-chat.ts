@@ -117,16 +117,23 @@ export function wantsImage(message: string): boolean {
 // after 10s"), so the server checks the picture actually loads (up to 2
 // tries) instead of sending the user a broken image link.
 export async function verifiedImageUrl(prompt: string): Promise<string | null> {
-  for (let attempt = 1; attempt <= 2; attempt++) {
+  // Pollinations free tier often 503s on the first call ("Classic API is at
+  // its limit") and succeeds on a retry seconds later (verified 23 Nov 2026:
+  // attempt 1 = 503, attempt 2 = 200 JPEG — the same prompt the user saw fail
+  // with "picture service is busy"). The old code gave up after 2 tries with
+  // a 20s timeout each (worst case 46s > the ~30s Netlify function cap).
+  // Retry 4 times with short timeouts/gaps so a busy first call doesn't kill
+  // the picture; typical total is ~26s, inside the cap.
+  for (let attempt = 1; attempt <= 4; attempt++) {
     const url = imageUrl(prompt);
     try {
-      const res = await fetch(url, { signal: AbortSignal.timeout(20_000) });
+      const res = await fetch(url, { signal: AbortSignal.timeout(8_000) });
       const type = res.headers.get("content-type") ?? "";
       if (res.ok && type.startsWith("image/")) return url;
     } catch {
       // fall through to retry
     }
-    if (attempt === 1) await new Promise((r) => setTimeout(r, 6000));
+    if (attempt < 4) await new Promise((r) => setTimeout(r, 2000));
   }
   return null;
 }

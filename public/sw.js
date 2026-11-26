@@ -1,9 +1,13 @@
 // Nizafa service worker — app-shell caching only.
-// Caches the shell (/, manifest, icons) so the app opens offline.
-// API responses are NEVER cached here: they are live data and must
-// always come from the network.
-const CACHE = "nizafa-shell-v1";
-const SHELL = ["/", "/manifest.webmanifest", "/icon-192.png", "/icon-512.png"];
+// Caches ONLY truly static files (manifest, icons). The homepage ("/")
+// is NEVER cached: it is a live page whose HTML points at hashed CSS
+// from the current deploy. Caching "/" cache-first (as v1 did) served
+// days-old HTML after every deploy, and the old HTML's hashed CSS no
+// longer exists — so returning visitors saw a plain unstyled page.
+// Network-first for "/" with the cache only as an offline fallback.
+// Bump CACHE on any future change so old caches are deleted on activate.
+const CACHE = "nizafa-shell-v2";
+const SHELL = ["/manifest.webmanifest", "/icon-192.png", "/icon-512.png"];
 
 self.addEventListener("install", (event) => {
   event.waitUntil(

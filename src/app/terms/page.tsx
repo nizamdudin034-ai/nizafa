@@ -31,7 +31,7 @@ export default function TermsPage() {
           <h2>Plans</h2>
           <p>
             <strong>Free</strong> is free forever with the limits shown on
-            the Plans page. <strong>Pro</strong> costs Rs 2,499 per month and{" "}
+            the Plans page. <strong>Pro</strong> costs Rs 1,500 per month and{" "}
             <strong>Team</strong> costs Rs 7,499 per month. Plan features are
             listed on the Plans page; the owner may change features or prices
             for new subscriptions, and will show the current terms on that

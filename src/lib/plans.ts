@@ -1,5 +1,5 @@
 // Nizafa plan catalogue — same plans as the original app.
-// Free / Pro Rs 2,499 / Team Rs 7,499 (PKR; USD shown as reference).
+// Free / Pro Rs 1,500 / Team Rs 7,499 (PKR; USD shown as reference).
 export type PlanId = "free" | "pro" | "team";
 
 export type Plan = {
@@ -29,8 +29,8 @@ export const PLANS: Plan[] = [
   {
     id: "pro",
     name: "Pro",
-    pricePkr: 2499,
-    priceUsd: 9,
+    pricePkr: 1500,
+    priceUsd: 5,
     tagline: "For serious creators growing one channel.",
     features: [
       "Everything in Free",

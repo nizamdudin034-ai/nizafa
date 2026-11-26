@@ -212,7 +212,7 @@ export default function PlansPage() {
                 <div>
                   <label className="label" htmlFor="pay-plan">Plan</label>
                   <select id="pay-plan" className="input" value={plan} onChange={(e) => setPlan(e.target.value as PlanId)}>
-                    <option value="pro">Pro — Rs 2,499 / month</option>
+                    <option value="pro">Pro — Rs 1,500 / month</option>
                     <option value="team">Team — Rs 7,499 / month</option>
                   </select>
                 </div>
